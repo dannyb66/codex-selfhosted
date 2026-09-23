@@ -38,6 +38,7 @@ TLOG="/tmp/codex-selfhosted-tunnel-$CODEX_ENV.log"
 MFA="/tmp/mfa-env-$CODEX_ENV.sh"
 USER_CODEX_CONFIG="$HOME/.codex/config.toml"
 CODEX_MCP_SET="${CODEX_MCP_SET:-github,context7}"
+CODEX_EFFORT="${CODEX_REASONING_EFFORT:-high}"   # default model_reasoning_effort in the generated CODEX_HOME (low|medium|high)
 # Codex<->vLLM-0.30.0 compatibility proxy: Codex sends a 'developer' role + typed 'input_text'
 # content chunks that vLLM 0.30.0 rejects (400) for ANY model. codex-role-proxy.py sits in front of
 # the tunnel and rewrites them; Codex points at the proxy. Set CODEX_PROXY=0 to bypass it.
@@ -74,7 +75,7 @@ make_codex_home() {  # $1 = served model; echoes an isolated CODEX_HOME; honors 
   {
     printf 'model = "%s"\n' "$m"
     printf 'model_provider = "selfhosted"\n'
-    printf 'model_reasoning_effort = "low"\n'
+    printf 'model_reasoning_effort = "%s"\n' "$CODEX_EFFORT"
     printf '[model_providers.selfhosted]\n'
     printf 'name = "Self-hosted vLLM"\n'
     printf 'base_url = "%s/v1"\n' "$CODEX_BASE"
