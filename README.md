@@ -99,7 +99,13 @@ Each env gets its own `/tmp/mfa-env-<env>.sh` and tunnel pidfile, so sessions do
 
 - **`instruct-14b`** — Qwen2.5-14B-Instruct-AWQ on **g5.xlarge (A10G 24GB)**. Tool-calls with Codex; curated MCP only (32k).
 - **`devstral-small-2`** — Devstral Small 2 24B (Mistral3), AWQ ~15GiB. Needs **g5.2xlarge** (A10G 24GB VRAM **+ 32GB RAM** — the 16GB weight file must mmap into >16GB host RAM; g5.xlarge's 16GB OOMs). Strong agentic coder — **but not usable from Codex** (see below).
-- **`coder-30b`** — Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active), AWQ **16.85 GiB**. Fits **g5.2xlarge (A10G 24GB)** at ~16–32k ctx / 1–2 sessions (fp8 KV, ~3.7GiB headroom); **g6e.xlarge (L40S 48GB)** for full MCP + more concurrency. Standard MoE (Ampere-safe) + **Codex-native tool format**.
+- **`coder-30b`** — Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active), AWQ **16.85 GiB**. Fits **g5.2xlarge (A10G 24GB)** at ~16–32k ctx / 1–2 sessions (fp8 KV, ~3.7GiB headroom); **g6e.xlarge (L40S 48GB)** for full MCP + more concurrency. Standard MoE (Ampere-safe) + **Codex-native tool format**. *(Currently the recommended Codex model — proven working on g5.2xlarge.)*
+
+> **Future upgrade — Qwen3.8-27B (needs a GPU upgrade too):** successor to Qwen3.6-27B, same **gated-DeltaNet
+> hybrid** class. Its ~20 GB weights leave no KV room on the 24 GB A10G, and the DeltaNet/MTP kernels want
+> **Ada+ (sm_89)** — so it needs **g6e.xlarge (L40S 48GB)** (`gpu_instance_type = "g6e.xlarge"` in Terraform),
+> **not** the current g5.2xlarge/A10G box. Before deploying: verify the exact AWQ size + a vLLM/transformers
+> combo that supports the Qwen3.8 arch (same due-diligence as the models above; watch the qwen3-parser bug #58147).
 
 Switch via the `model_key` Terraform var (redeploys the taskdef) — no code change. `kv_cache_dtype=fp8`
 roughly doubles the number of concurrent sessions the GPU holds.
