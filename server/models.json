@@ -17,7 +17,7 @@
       "hf_model": "cpatonn/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit",
       "served_name": "qwen3-coder-30b",
       "tool_parser": "qwen3_coder",
-      "max_model_len": 32768,
+      "max_model_len": 65536,
       "quant": "none",
       "kv_cache_dtype": "fp8",
       "instance": "g5.2xlarge",
