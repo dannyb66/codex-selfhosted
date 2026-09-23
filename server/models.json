@@ -13,15 +13,17 @@
       "_note": "Fits a 24GB A10G (g5.xlarge). Tool-calls correctly with Codex. Curated MCP only (32k ceiling)."
     },
     "coder-30b": {
-      "_note": "Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active). AWQ 16.85GiB -> loads ~16.9GiB VRAM on A10G; FITS g5.2xlarge (24GB VRAM + 32GB RAM) at 16k ctx / ~1 session (0.84GiB KV @0.92 util); g6e.xlarge (L40S 48GB) for room. Standard MoE (Ampere-safe). Codex-native (qwen3_coder tool format) -> works with Codex via bin/codex-role-proxy.py. quant=none: compressed-tensors auto-detect.",
+      "_note": "Qwen3-Coder-30B-A3B (Qwen3 MoE). AWQ 16.85GiB -> ~16.9GiB VRAM on A10G. Deployed on g5.2xlarge with --enforce-eager + gpu-mem-util 0.95 to free CUDA-graph memory for KV -> 32k context fits (16k KV was too small for Codex's prompt+MCP+files+history). Decode ~10-20% slower (no CUDA graphs). For big context + concurrency + graph speed use g6e.xlarge (L40S 48GB). Standard MoE (Ampere-safe). Codex-native (qwen3_coder) via the role-proxy. quant=none: compressed-tensors auto-detect.",
       "hf_model": "cpatonn/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit",
       "served_name": "qwen3-coder-30b",
       "tool_parser": "qwen3_coder",
-      "max_model_len": 16384,
+      "max_model_len": 32768,
       "quant": "none",
       "kv_cache_dtype": "fp8",
       "instance": "g5.2xlarge",
-      "gpu_min": 1
+      "gpu_min": 1,
+      "enforce_eager": true,
+      "gpu_memory_utilization": 0.95
     }
   }
 }
