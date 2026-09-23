@@ -1,0 +1,17 @@
+# local per-account configs (keep only the example)
+*.env
+!config.example.env
+.config/
+
+# terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+infra/terraform.tfvars
+crash.log
+
+# transient
+/tmp/mfa-env-*.sh
+*.log
+.DS_Store

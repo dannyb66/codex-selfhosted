@@ -1,0 +1,12 @@
+# Self-hosted vLLM OpenAI-compatible server for Codex. Runs on an EC2 GPU (A10G/L4/L40S)
+# behind an ECS EC2 GPU capacity provider (scale-to-zero). vLLM-only — no async worker.
+# The model is NOT baked; vLLM downloads it from HuggingFace on first boot (~minutes cold).
+FROM vllm/vllm-openai:latest
+
+# curl for health checks; entrypoint + registry.
+COPY server/entrypoint-gpu.sh /app/entrypoint-gpu.sh
+COPY server/models.json       /app/models.json
+RUN chmod +x /app/entrypoint-gpu.sh
+
+# Override the base image's api_server entrypoint with our MODEL_KEY-driven launcher.
+ENTRYPOINT ["/app/entrypoint-gpu.sh"]

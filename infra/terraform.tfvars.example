@@ -1,0 +1,22 @@
+# Copy to terraform.tfvars and edit. Everything here has a sensible default in variables.tf;
+# you only need to set the networking inputs for your account.
+
+aws_region  = "us-east-2"
+name_prefix = "codex-selfhosted"
+
+# --- GPU / model ---
+gpu_instance_type = "g5.xlarge" # A10G 24GB (14B). Use "g6e.xlarge" (L40S 48GB) for Qwen3-Coder-30B / full MCP.
+model_key         = "instruct-14b"
+image_tag         = "gpu"
+max_gpu_instances = 2
+use_spot          = false # true = ~65% cheaper, interruptible
+
+# --- Networking: OPTION A — reuse an existing VPC (recommended) ---
+create_network = false
+vpc_id         = "vpc-xxxxxxxx"
+subnet_ids     = ["subnet-aaaaaaaa", "subnet-bbbbbbbb"] # PRIVATE subnets with NAT egress (HF pull + ECR)
+
+# --- Networking: OPTION B — let Terraform build a minimal VPC ---
+# create_network = true
+# vpc_cidr       = "10.20.0.0/16"
+# (leave vpc_id / subnet_ids unset)

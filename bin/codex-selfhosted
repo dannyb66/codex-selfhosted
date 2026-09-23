@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# codex-selfhosted — drive the OpenAI Codex CLI against a self-hosted vLLM GPU service on AWS.
+# Portable + multi-account: all AWS/ECS names come from a per-account config, not hardcoded.
+#
+#   codex-selfhosted up             warm the GPU (min=1), wait until it serves, open ONE shared SSM tunnel
+#   codex-selfhosted chat ["task"]  INTERACTIVE streaming session (bare `codex` TUI) — run from many terminals
+#   codex-selfhosted exec "task"    non-interactive one-shot (`codex exec`), lean (no MCP unless CODEX_MCP_SET_EXEC)
+#   codex-selfhosted run  ["task"]  up (if needed) then chat
+#   codex-selfhosted status         show GPU + tunnel + endpoint
+#   codex-selfhosted down           scale the GPU to $0 and close the shared tunnel
+#
+# Concurrency: ONE shared tunnel on a fixed local port; the vLLM server handles concurrency
+# (continuous batching). Each chat/exec gets its OWN isolated CODEX_HOME (temp dir) so sessions
+# never collide. Run `chat` from N terminals at once.
+#
+# Config: sourced from $CODEX_SELFHOSTED_CONFIG or ~/.config/codex-selfhosted/${CODEX_ENV:-default}.env
+#   Required: AWS_PROFILE AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP
+#   Optional: CODEX_PORT(8000) CODEX_MCP_SET(github,context7,...) AWS_ACCOUNT_ID
+# MFA: run `aws-mfa.sh <code>` first (writes /tmp/mfa-env-${CODEX_ENV}.sh). See README.
+set -uo pipefail
+
+CODEX_ENV="${CODEX_ENV:-default}"
+CFG="${CODEX_SELFHOSTED_CONFIG:-$HOME/.config/codex-selfhosted/$CODEX_ENV.env}"
+die() { echo "ERROR: $*" >&2; exit 1; }
+[ -f "$CFG" ] && . "$CFG" || echo "note: no config at $CFG (using env vars)" >&2
+
+: "${AWS_REGION:?set AWS_REGION (in $CFG)}"
+: "${ECS_CLUSTER:?set ECS_CLUSTER (in $CFG)}"
+: "${ECS_SERVICE:?set ECS_SERVICE (in $CFG)}"
+: "${ASG_NAME:?set ASG_NAME (in $CFG)}"
+: "${LOG_GROUP:?set LOG_GROUP (in $CFG)}"
+REGION="$AWS_REGION"; CLUSTER="$ECS_CLUSTER"; SVC="$ECS_SERVICE"; ASG="$ASG_NAME"; LG="$LOG_GROUP"
+PORT="${CODEX_PORT:-8000}"
+SCALABLE="service/$CLUSTER/$SVC"
+BASE="http://localhost:$PORT"
+PIDFILE="/tmp/codex-selfhosted-tunnel-$CODEX_ENV.pid"
+TLOG="/tmp/codex-selfhosted-tunnel-$CODEX_ENV.log"
+MFA="/tmp/mfa-env-$CODEX_ENV.sh"
+USER_CODEX_CONFIG="$HOME/.codex/config.toml"
+CODEX_MCP_SET="${CODEX_MCP_SET:-github,context7}"
+
+[ -f "$MFA" ] || die "no $MFA — run: source \"\$(dirname \"\$0\")/aws-mfa.sh\" <MFA_CODE>  (CODEX_ENV=$CODEX_ENV)"
+set -a; . "$MFA" 2>/dev/null; set +a
+command -v aws >/dev/null || die "aws cli not found"
+
+running_task() { aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SVC" --desired-status RUNNING --region "$REGION" --query 'taskArns[0]' --output text 2>/dev/null; }
+
+resolve_targets() {  # -> "IP EC2" or non-zero
+  local t ip ci ec2
+  t=$(running_task); { [ "$t" = "None" ] || [ -z "$t" ]; } && return 1
+  ip=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$t" --region "$REGION" --query "tasks[0].attachments[0].details[?name=='privateIPv4Address'].value|[0]" --output text 2>/dev/null)
+  ci=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$t" --region "$REGION" --query "tasks[0].containerInstanceArn" --output text 2>/dev/null)
+  ec2=$(aws ecs describe-container-instances --cluster "$CLUSTER" --container-instances "$ci" --region "$REGION" --query "containerInstances[0].ec2InstanceId" --output text 2>/dev/null)
+  { [ -z "$ip" ] || [ "$ip" = "None" ] || [ -z "$ec2" ] || [ "$ec2" = "None" ]; } && return 1
+  echo "$ip $ec2"
+}
+
+tunnel_up()   { curl -sf "$BASE/health" >/dev/null 2>&1; }
+served_model(){ curl -sf "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
+
+make_codex_home() {  # $1 = served model; echoes an isolated CODEX_HOME; honors CODEX_MCP_SET
+  local m="$1" home cwd
+  home=$(mktemp -d "${TMPDIR:-/tmp}/codex-selfhosted.XXXXXX")
+  cwd=$(pwd)
+  {
+    printf 'model = "%s"\n' "$m"
+    printf 'model_provider = "selfhosted"\n'
+    printf 'model_reasoning_effort = "low"\n'
+    printf '[model_providers.selfhosted]\n'
+    printf 'name = "Self-hosted vLLM"\n'
+    printf 'base_url = "%s/v1"\n' "$BASE"
+    printf 'wire_api = "responses"\n'
+    printf '[history]\npersistence = "none"\n'
+    printf '[tui]\nshow_tooltips = false\n'
+    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$cwd"
+  } > "$home/config.toml"
+  if [ -n "$CODEX_MCP_SET" ] && [ -f "$USER_CODEX_CONFIG" ]; then
+    CODEX_MCP_SET="$CODEX_MCP_SET" python3 - "$USER_CODEX_CONFIG" >> "$home/config.toml" <<'PY'
+import os, re, sys
+ids = {x.strip() for x in os.environ.get("CODEX_MCP_SET", "").split(",") if x.strip()}
+lines = open(sys.argv[1]).read().splitlines(keepends=True)
+hdr = re.compile(r'^\s*\[mcp_servers\.([^.\]]+)')
+out, i, n = [], 0, len(lines)
+while i < n:
+    m = hdr.match(lines[i])
+    if m and m.group(1) in ids:
+        out.append(lines[i]); i += 1
+        while i < n and not re.match(r'^\s*\[', lines[i]):
+            out.append(lines[i]); i += 1
+    else:
+        i += 1
+sys.stdout.write("".join(out))
+PY
+  fi
+  echo "$home"
+}
+
+ensure_serving() {
+  tunnel_up && return 0
+  echo "[up] warm GPU (min=1)..."
+  aws application-autoscaling register-scalable-target --service-namespace ecs \
+    --resource-id "$SCALABLE" --scalable-dimension ecs:service:DesiredCount \
+    --min-capacity 1 --max-capacity "${MAX_GPU:-2}" --region "$REGION" >/dev/null || die "register-scalable-target failed"
+  # Already warm (a task is running from a prior/other session)? Skip the cold-start log-wait —
+  # the "Application startup complete" line is hours old on a warm box, so waiting for a *recent*
+  # one would false-hang. open_tunnel's /health retries confirm the model is actually serving.
+  local running
+  running=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null)
+  if [[ "${running:-0}" =~ ^[1-9][0-9]*$ ]]; then echo "[up] task already running — skipping cold-start wait."; return 0; fi
+  echo "[up] waiting for the model to serve (cold start ~10 min)..."
+  local i start
+  for i in $(seq 1 60); do
+    start=$(( ($(date +%s) - 90) * 1000 ))
+    [ "$(aws logs filter-log-events --log-group-name "$LG" --region "$REGION" --start-time "$start" --filter-pattern '?"Application startup complete" ?"Uvicorn running on http"' --query 'length(events)' --output text 2>/dev/null)" != "0" ] && { echo "[up] model serving."; return 0; }
+    [ "$i" = 60 ] && die "timed out waiting for serving (check: $0 status)"
+    sleep 20
+  done
+}
+
+open_tunnel() {
+  tunnel_up && { echo "[up] tunnel already up."; return 0; }
+  local tg ip ec2 i
+  tg=$(resolve_targets) || die "could not resolve the running task's ENI/host"
+  ip=${tg% *}; ec2=${tg#* }
+  echo "[up] opening shared SSM tunnel  localhost:$PORT -> $ip:$PORT via $ec2 ..."
+  [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+  nohup aws ssm start-session --target "$ec2" \
+    --document-name AWS-StartPortForwardingSessionToRemoteHost \
+    --parameters "host=$ip,portNumber=$PORT,localPortNumber=$PORT" --region "$REGION" >"$TLOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  for i in $(seq 1 20); do tunnel_up && break; sleep 2; done
+  tunnel_up || die "tunnel did not come up (see $TLOG)"
+}
+
+cmd_up() {
+  ensure_serving; open_tunnel
+  local m; m=$(served_model); [ -n "$m" ] || die "endpoint up but /v1/models empty"
+  echo "[up] READY ($CODEX_ENV). served model: $m"
+  echo "     chat:  $0 chat        done:  $0 down"
+}
+
+cmd_chat() {
+  tunnel_up || die "tunnel not up — run: $0 up"
+  local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
+  home=$(make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in: the EXIT trap fires after this fn returns, where a local would be unbound under set -u
+  echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  (/quit to exit)"
+  CODEX_HOME="$home" codex --sandbox workspace-write -c model_provider=selfhosted -c model="$m" ${1:+"$1"}
+}
+
+cmd_exec() {
+  [ -n "${1:-}" ] || die "usage: $0 exec \"<task>\""
+  tunnel_up || die "tunnel not up — run: $0 up"
+  local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
+  home=$(CODEX_MCP_SET="${CODEX_MCP_SET_EXEC:-}" make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in (see cmd_chat)
+  echo "[exec] model=$m"
+  CODEX_HOME="$home" codex exec --skip-git-repo-check -s workspace-write -c approval_policy="never" \
+    -c model_provider=selfhosted -c model="$m" "$1"
+}
+
+cmd_status() {
+  local d r m tp
+  d=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].desiredCount' --output text 2>/dev/null)
+  r=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null)
+  echo "env=$CODEX_ENV  GPU service: desired=$d running=$r"
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then tp="up (pid $(cat "$PIDFILE"))"; else tp="down"; fi
+  echo "tunnel: $tp"
+  if tunnel_up; then m=$(served_model); echo "endpoint: serving ($m)"; else echo "endpoint: unreachable"; fi
+}
+
+cmd_down() {
+  echo "[down] scale GPU to 0 ($CODEX_ENV)..."
+  aws application-autoscaling register-scalable-target --service-namespace ecs \
+    --resource-id "$SCALABLE" --scalable-dimension ecs:service:DesiredCount \
+    --min-capacity 0 --max-capacity "${MAX_GPU:-2}" --region "$REGION" >/dev/null 2>&1
+  aws ecs update-service --cluster "$CLUSTER" --service "$SVC" --desired-count 0 --region "$REGION" >/dev/null 2>&1
+  aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$ASG" --min-size 0 --desired-capacity 0 --region "$REGION" 2>/dev/null
+  [ -f "$PIDFILE" ] && { kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; }
+  echo "[down] GPU scaling to \$0; shared tunnel closed."
+}
+
+case "${1:-}" in
+  up)     cmd_up ;;
+  chat)   shift; cmd_chat "${1:-}" ;;
+  exec)   shift; cmd_exec "${*:-}" ;;
+  run)    tunnel_up || cmd_up; shift; cmd_chat "${1:-}" ;;
+  status) cmd_status ;;
+  down)   cmd_down ;;
+  *) echo "usage: CODEX_ENV=<acct> $0 {up|chat [\"task\"]|exec \"task\"|run [\"task\"]|status|down}"; exit 1 ;;
+esac
