@@ -98,10 +98,28 @@ Each env gets its own `/tmp/mfa-env-<env>.sh` and tunnel pidfile, so sessions do
 ## Models (`server/models.json`)
 
 - **`instruct-14b`** — Qwen2.5-14B-Instruct-AWQ on **g5.xlarge (A10G 24GB)**. Tool-calls with Codex; curated MCP only (32k).
-- **`coder-30b`** — Qwen3-Coder-30B-A3B on **g6e.xlarge (L40S 48GB)**. Best agentic coder + full MCP + large context.
+- **`devstral-small-2`** — Devstral Small 2 24B (Mistral3), AWQ ~15GiB. Needs **g5.2xlarge** (A10G 24GB VRAM **+ 32GB RAM** — the 16GB weight file must mmap into >16GB host RAM; g5.xlarge's 16GB OOMs). Strong agentic coder — **but not usable from Codex** (see below).
+- **`coder-30b`** — Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active), AWQ **16.85 GiB**. Fits **g5.2xlarge (A10G 24GB)** at ~16–32k ctx / 1–2 sessions (fp8 KV, ~3.7GiB headroom); **g6e.xlarge (L40S 48GB)** for full MCP + more concurrency. Standard MoE (Ampere-safe) + **Codex-native tool format**.
 
 Switch via the `model_key` Terraform var (redeploys the taskdef) — no code change. `kv_cache_dtype=fp8`
 roughly doubles the number of concurrent sessions the GPU holds.
+
+### Model ↔ Codex compatibility (important)
+
+Codex speaks the OpenAI Responses API + OpenAI tool format. Two layers matter:
+
+1. **vLLM 0.30.0 Responses-API gaps — affect ALL served models.** Codex sends a `developer` role and typed
+   `input_text` content chunks; vLLM 0.30.0 rejects both (`400 Unknown message role: developer` /
+   `'input_text' is not a valid ChunkTypes`). Fix: run **`bin/codex-role-proxy.py`** between Codex and the
+   tunnel (point `base_url` at the proxy) — it rewrites `developer`→`system` and flattens content, streaming
+   responses through. Proven: both `400` direct → `200` via proxy.
+2. **Model tool-format fit.**
+   - **Qwen models (`qwen3_coder` / `hermes` parser)** use the OpenAI tool format → work with Codex (+ proxy).
+   - **Mistral models (Devstral, `mistral` parser) do NOT work with Codex.** mistral_common requires
+     9-char alphanumeric tool-call ids and rejects Codex's `call_<hex>` ids, plus a
+     `justification`/`sandbox_permissions` tool-schema mismatch. Devstral is built for **OpenHands /
+     mini-SWE-agent / Mistral `vibe`**, not Codex — drive it with those. For **Codex** on self-hosted, use
+     **`coder-30b`** (Qwen3-Coder-30B-A3B) — it fits the same g5.2xlarge box and speaks Codex's tool format.
 
 ---
 
