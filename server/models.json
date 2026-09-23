@@ -1,5 +1,5 @@
 {
-  "_comment": "Model registry. entrypoint-gpu.sh resolves MODEL_KEY -> a row. Switch models by changing MODEL_KEY in the taskdef (Terraform var model_key) + redeploy. served_name = what the Codex `model` must reference + what the client reads from /v1/models. tool_parser enables function-calling (hermes for Qwen2.5, qwen3_coder for Qwen3 — verify against your pinned vLLM). kv_cache_dtype=fp8 ~doubles concurrent-session KV headroom (works on Ampere/A10G). instance = the GPU the entry needs.",
+  "_comment": "Model registry. entrypoint-gpu.sh resolves MODEL_KEY -> a row. Switch models by changing MODEL_KEY in the taskdef (Terraform var model_key) + redeploy. served_name = what the Codex `model` must reference + what the client reads from /v1/models. tool_parser enables function-calling (hermes for Qwen2.5, qwen3_coder for Qwen3 \u2014 verify against your pinned vLLM). kv_cache_dtype=fp8 ~doubles concurrent-session KV headroom (works on Ampere/A10G). instance = the GPU the entry needs.",
   "models": {
     "instruct-14b": {
       "hf_model": "Qwen/Qwen2.5-14B-Instruct-AWQ",
@@ -13,16 +13,15 @@
       "_note": "Fits a 24GB A10G (g5.xlarge). Tool-calls correctly with Codex. Curated MCP only (32k ceiling)."
     },
     "coder-30b": {
-      "hf_model": "Qwen/Qwen3-Coder-30B-A3B-Instruct-AWQ",
+      "_note": "Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active). AWQ 16.85GiB -> loads ~16.9GiB VRAM on A10G; FITS g5.2xlarge (24GB VRAM + 32GB RAM) at 16k ctx / ~1 session (0.84GiB KV @0.92 util); g6e.xlarge (L40S 48GB) for room. Standard MoE (Ampere-safe). Codex-native (qwen3_coder tool format) -> works with Codex via bin/codex-role-proxy.py. quant=none: compressed-tensors auto-detect.",
+      "hf_model": "cpatonn/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit",
       "served_name": "qwen3-coder-30b",
       "tool_parser": "qwen3_coder",
-      "reasoning_parser": "qwen3",
-      "max_model_len": 98304,
-      "quant": "awq",
+      "max_model_len": 16384,
+      "quant": "none",
       "kv_cache_dtype": "fp8",
-      "instance": "g6e.xlarge",
-      "gpu_min": 1,
-      "_note": "Best agentic coder + FULL MCP + large context. Needs a 48GB GPU (g6e.xlarge L40S). Verify tool_parser (qwen3_coder vs qwen3_xml) on your pinned vLLM."
+      "instance": "g5.2xlarge",
+      "gpu_min": 1
     }
   }
 }
