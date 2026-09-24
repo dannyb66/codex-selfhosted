@@ -2,7 +2,7 @@
 # codex-selfhosted — drive the OpenAI Codex CLI against a self-hosted vLLM GPU service on AWS.
 # Portable + multi-account: all AWS/ECS names come from a per-account config, not hardcoded.
 #
-#   codex-selfhosted up             warm the GPU (min=1), wait until it serves, open ONE shared SSM tunnel
+#   codex-selfhosted up             warm the GPU (min=1), open the SSM tunnel, start the idle-auto-down reaper
 #   codex-selfhosted chat ["task"]  INTERACTIVE streaming session (bare `codex` TUI) — run from many terminals
 #   codex-selfhosted resume [id]    resume a past `chat` (no id -> picker; --last -> most recent; --all -> any cwd)
 #   codex-selfhosted exec "task"    non-interactive one-shot (`codex exec`), lean (no MCP unless CODEX_MCP_SET_EXEC)
@@ -17,6 +17,7 @@
 # Config: sourced from $CODEX_SELFHOSTED_CONFIG or ~/.config/codex-selfhosted/${CODEX_ENV:-default}.env
 #   Required: AWS_PROFILE AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP
 #   Optional: CODEX_PORT(8000) CODEX_MCP_SET(github,context7,...) AWS_ACCOUNT_ID
+#             CODEX_IDLE_REAPER(1=auto-down when idle) CODEX_IDLE_TTL_MIN(30 min idle before auto-down)
 # MFA: run `aws-mfa.sh <code>` first (writes /tmp/mfa-env-${CODEX_ENV}.sh). See README.
 set -uo pipefail
 
@@ -51,6 +52,12 @@ PROXY_PIDFILE="/tmp/codex-selfhosted-proxy-$CODEX_ENV.pid"
 PROXY_LOG="/tmp/codex-selfhosted-proxy-$CODEX_ENV.log"
 ROLE_PROXY="$(cd "$(dirname "$0")" && pwd)/codex-role-proxy.py"
 [ "${CODEX_PROXY:-1}" = "1" ] && CODEX_BASE="$PROXY_BASE" || CODEX_BASE="$BASE"
+# Idle auto-down (Layer 1): `up` starts a client-side reaper alongside the tunnel/proxy. It polls
+# vLLM /metrics through the tunnel and runs `down` after CODEX_IDLE_TTL_MIN of no request activity.
+CODEX_IDLE_REAPER="${CODEX_IDLE_REAPER:-1}"      # 1=auto-down when idle; 0=stay warm until manual `down`
+CODEX_IDLE_TTL_MIN="${CODEX_IDLE_TTL_MIN:-30}"   # minutes of no vLLM activity before auto-down
+REAPER_PIDFILE="/tmp/codex-selfhosted-reaper-$CODEX_ENV.pid"
+REAPER_LOG="/tmp/codex-selfhosted-reaper-$CODEX_ENV.log"
 
 [ -f "$MFA" ] || die "no $MFA — run: source \"\$(dirname \"\$0\")/aws-mfa.sh\" <MFA_CODE>  (CODEX_ENV=$CODEX_ENV)"
 set -a; . "$MFA" 2>/dev/null; set +a
@@ -165,8 +172,41 @@ start_proxy() {   # Codex<->vLLM-0.30.0 compat shim (developer->system, input_te
   curl -sf "$PROXY_BASE/health" >/dev/null 2>&1 && echo "[up] role-proxy on $PROXY_BASE -> $BASE" || echo "[up] WARN: role-proxy did not come up (see $PROXY_LOG)" >&2
 }
 
+start_reaper() {   # idempotent: idle auto-down watchdog (Layer 1); polls vLLM /metrics via the tunnel
+  [ "$CODEX_IDLE_REAPER" = "1" ] || { echo "[up] idle-reaper OFF (CODEX_IDLE_REAPER=0) — remember to $0 down"; return 0; }
+  if [ -f "$REAPER_PIDFILE" ] && kill -0 "$(cat "$REAPER_PIDFILE")" 2>/dev/null; then echo "[up] idle-reaper already running."; return 0; fi
+  nohup "$0" __reap >"$REAPER_LOG" 2>&1 &
+  echo $! > "$REAPER_PIDFILE"
+  echo "[up] idle-reaper ON: auto-down after ${CODEX_IDLE_TTL_MIN}m idle (disable: CODEX_IDLE_REAPER=0; log: $REAPER_LOG)"
+}
+
+cmd_reap() {   # internal (__reap): loop until vLLM has been idle >= TTL, then scale to zero. started by `up`.
+  local last now idle succ prev metrics running ttl
+  ttl=${CODEX_IDLE_TTL_SEC:-$(( CODEX_IDLE_TTL_MIN * 60 ))}; last=$(date +%s); prev=""   # TTL_SEC overrides for testing/tuning
+  echo "[reaper] started $(date -u +%H:%M:%SZ)  ttl=${ttl}s poll=${CODEX_REAP_POLL:-60}s"
+  while :; do
+    sleep "${CODEX_REAP_POLL:-60}"
+    metrics=$(curl -sf --max-time 5 "$BASE/metrics" 2>/dev/null)   # scrape through the tunnel (both lanes' activity)
+    if [ -n "$metrics" ]; then
+      running=$(printf '%s\n' "$metrics" | awk '/^vllm:num_requests_(running|waiting)/{r+=$2} END{printf "%d", r+0}')
+      succ=$(printf '%s\n' "$metrics" | awk '/^vllm:request_success_total/{s+=$2} END{printf "%d", s+0}')
+      if [ "${running:-0}" != "0" ] || { [ -n "$prev" ] && [ "$succ" != "$prev" ]; }; then last=$(date +%s); fi
+      prev="$succ"
+    fi
+    now=$(date +%s); idle=$(( now - last ))
+    if [ "$idle" -ge "$ttl" ]; then
+      echo "[reaper] idle ${idle}s >= ${ttl}s — AUTO-DOWN $(date -u +%H:%M:%SZ)"
+      [ -f "$MFA" ] && { set -a; . "$MFA" 2>/dev/null; set +a; }   # re-source creds in case they were refreshed
+      rm -f "$REAPER_PIDFILE"                                       # drop our pid first so scale_to_zero won't kill us mid-down
+      scale_to_zero
+      echo "[reaper] done $(date -u +%H:%M:%SZ)."
+      exit 0
+    fi
+  done
+}
+
 cmd_up() {
-  ensure_serving; open_tunnel; start_proxy
+  ensure_serving; open_tunnel; start_proxy; start_reaper
   local m; m=$(served_model); [ -n "$m" ] || die "endpoint up but /v1/models empty"
   echo "[up] READY ($CODEX_ENV). served model: $m"
   echo "     chat:  $0 chat        done:  $0 down"
@@ -210,19 +250,25 @@ cmd_status() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then tp="up (pid $(cat "$PIDFILE"))"; else tp="down"; fi
   echo "tunnel: $tp"
   if [ -f "$PROXY_PIDFILE" ] && kill -0 "$(cat "$PROXY_PIDFILE")" 2>/dev/null; then echo "role-proxy: up ($PROXY_BASE, Codex uses this)"; else echo "role-proxy: down"; fi
+  if [ -f "$REAPER_PIDFILE" ] && kill -0 "$(cat "$REAPER_PIDFILE")" 2>/dev/null; then echo "idle-reaper: on (auto-down after ${CODEX_IDLE_TTL_MIN}m idle)"; else echo "idle-reaper: off"; fi
   if tunnel_up; then m=$(served_model); echo "endpoint: serving ($m)"; else echo "endpoint: unreachable"; fi
 }
 
-cmd_down() {
-  echo "[down] scale GPU to 0 ($CODEX_ENV)..."
+scale_to_zero() {   # the actual down: scale service+ASG to 0 and close tunnel/proxy/reaper. shared by `down` + reaper.
   aws application-autoscaling register-scalable-target --service-namespace ecs \
     --resource-id "$SCALABLE" --scalable-dimension ecs:service:DesiredCount \
     --min-capacity 0 --max-capacity "${MAX_GPU:-2}" --region "$REGION" >/dev/null 2>&1
   aws ecs update-service --cluster "$CLUSTER" --service "$SVC" --desired-count 0 --region "$REGION" >/dev/null 2>&1
   aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$ASG" --min-size 0 --desired-capacity 0 --region "$REGION" 2>/dev/null
+  [ -f "$REAPER_PIDFILE" ] && { kill "$(cat "$REAPER_PIDFILE")" 2>/dev/null; rm -f "$REAPER_PIDFILE"; }   # no-op if the reaper itself is calling
   [ -f "$PIDFILE" ] && { kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; }
   [ -f "$PROXY_PIDFILE" ] && { kill "$(cat "$PROXY_PIDFILE")" 2>/dev/null; rm -f "$PROXY_PIDFILE"; }
-  echo "[down] GPU scaling to \$0; tunnel + role-proxy closed."
+}
+
+cmd_down() {
+  echo "[down] scale GPU to 0 ($CODEX_ENV)..."
+  scale_to_zero
+  echo "[down] GPU scaling to \$0; tunnel + role-proxy + idle-reaper closed."
 }
 
 case "${1:-}" in
@@ -233,5 +279,6 @@ case "${1:-}" in
   resume) shift; cmd_resume "$@" ;;
   status) cmd_status ;;
   down)   cmd_down ;;
+  __reap) cmd_reap ;;   # internal: the idle-auto-down watchdog started by `up`
   *) echo "usage: CODEX_ENV=<acct> $0 {up|chat [\"task\"]|resume [id|--last|--all]|exec \"task\"|run [\"task\"]|status|down}"; exit 1 ;;
 esac
