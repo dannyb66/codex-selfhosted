@@ -6,6 +6,12 @@
 # This complements the client-side idle reaper (Layer 1 in bin/codex-selfhosted): Layer 1 downs on
 # *idle* while the client is alive; Layer 2 is an *absolute* cap that does not depend on the client.
 #
+# DEPLOY MODES:
+#   - image-entrypoint taskdefs (MODEL_KEY path): entrypoint-gpu.sh spawns the watchdog -> runs THIS file.
+#   - entryPoint-OVERRIDE taskdefs (e.g. the devci coder-30b taskdef, which overrides the image
+#     entrypoint and so bypasses entrypoint-gpu.sh): the watchdog ships as a non-essential SIDECAR
+#     container that inlines this same logic. See server/max-warm-sidecar.json (the live-deployed shape).
+#
 # Requires (set in the taskdef) + the task role granted the matching permissions:
 #   SELF_CLUSTER   ECS cluster name            (ecs:UpdateService)
 #   SELF_SERVICE   ECS service name            (ecs:UpdateService)

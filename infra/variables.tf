@@ -32,9 +32,9 @@ variable "image_tag" {
 }
 
 variable "max_gpu_instances" {
-  description = "ASG max size (also the app-autoscaling max). Scale-to-zero min is always 0."
+  description = "ASG max size (also the app-autoscaling max). Scale-to-zero min is always 0. Default 1: one shared box serves all sessions via vLLM continuous batching; >1 lets the capacity provider over-provision a 2nd idle box during a slow cold start."
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "use_spot" {
