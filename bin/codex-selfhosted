@@ -4,14 +4,15 @@
 #
 #   codex-selfhosted up             warm the GPU (min=1), wait until it serves, open ONE shared SSM tunnel
 #   codex-selfhosted chat ["task"]  INTERACTIVE streaming session (bare `codex` TUI) — run from many terminals
+#   codex-selfhosted resume [id]    resume a past `chat` (no id -> picker; --last -> most recent; --all -> any cwd)
 #   codex-selfhosted exec "task"    non-interactive one-shot (`codex exec`), lean (no MCP unless CODEX_MCP_SET_EXEC)
 #   codex-selfhosted run  ["task"]  up (if needed) then chat
 #   codex-selfhosted status         show GPU + tunnel + endpoint
 #   codex-selfhosted down           scale the GPU to $0 and close the shared tunnel
 #
 # Concurrency: ONE shared tunnel on a fixed local port; the vLLM server handles concurrency
-# (continuous batching). Each chat/exec gets its OWN isolated CODEX_HOME (temp dir) so sessions
-# never collide. Run `chat` from N terminals at once.
+# (continuous batching). `chat`/`resume` share a persistent CODEX_HOME per env (so session rollouts
+# survive for `resume`); `exec` gets its own throwaway CODEX_HOME. Run `chat` from N terminals at once.
 #
 # Config: sourced from $CODEX_SELFHOSTED_CONFIG or ~/.config/codex-selfhosted/${CODEX_ENV:-default}.env
 #   Required: AWS_PROFILE AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP
@@ -37,6 +38,8 @@ PIDFILE="/tmp/codex-selfhosted-tunnel-$CODEX_ENV.pid"
 TLOG="/tmp/codex-selfhosted-tunnel-$CODEX_ENV.log"
 MFA="/tmp/mfa-env-$CODEX_ENV.sh"
 USER_CODEX_CONFIG="$HOME/.codex/config.toml"
+# Persistent CODEX_HOME for `chat`/`resume` so session rollouts survive (exec stays ephemeral).
+CODEX_HOME_DIR="${CODEX_HOME_PERSIST:-$HOME/.config/codex-selfhosted/codexhome-$CODEX_ENV}"
 CODEX_MCP_SET="${CODEX_MCP_SET:-github,context7}"
 CODEX_EFFORT="${CODEX_REASONING_EFFORT:-high}"   # default model_reasoning_effort in the generated CODEX_HOME (low|medium|high)
 # Codex<->vLLM-0.30.0 compatibility proxy: Codex sends a 'developer' role + typed 'input_text'
@@ -68,10 +71,11 @@ resolve_targets() {  # -> "IP EC2" or non-zero
 tunnel_up()   { curl -sf "$BASE/health" >/dev/null 2>&1; }
 served_model(){ curl -sf "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
 
-make_codex_home() {  # $1 = served model; echoes an isolated CODEX_HOME; honors CODEX_MCP_SET
-  local m="$1" home cwd
-  home=$(mktemp -d "${TMPDIR:-/tmp}/codex-selfhosted.XXXXXX")
+make_codex_home() {  # $1=served model; $2=optional home dir (default: fresh mktemp/ephemeral). honors CODEX_MCP_SET
+  local m="$1" home="${2:-}" cwd
   cwd=$(pwd)
+  [ -n "$home" ] || home=$(mktemp -d "${TMPDIR:-/tmp}/codex-selfhosted.XXXXXX")
+  mkdir -p "$home"
   {
     printf 'model = "%s"\n' "$m"
     printf 'model_provider = "selfhosted"\n'
@@ -80,8 +84,7 @@ make_codex_home() {  # $1 = served model; echoes an isolated CODEX_HOME; honors 
     printf 'name = "Self-hosted vLLM"\n'
     printf 'base_url = "%s/v1"\n' "$CODEX_BASE"
     printf 'wire_api = "responses"\n'
-    printf '[history]\npersistence = "none"\n'
-    printf '[tui]\nshow_tooltips = false\n'
+    printf '[tui]\nshow_tooltips = false\n'   # (no history.persistence=none: session rollouts must survive for `resume`)
     printf '[projects."%s"]\ntrust_level = "trusted"\n' "$cwd"
   } > "$home/config.toml"
   if [ -n "$CODEX_MCP_SET" ] && [ -f "$USER_CODEX_CONFIG" ]; then
@@ -164,9 +167,19 @@ cmd_chat() {
   tunnel_up || die "tunnel not up — run: $0 up"
   start_proxy   # idempotent: Codex points at the proxy, so make sure it's running
   local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
-  home=$(make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in: the EXIT trap fires after this fn returns, where a local would be unbound under set -u
-  echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  (/quit to exit)"
+  home=$(make_codex_home "$m" "$CODEX_HOME_DIR")   # persistent home: session rollouts survive here for `resume`
+  echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  (/quit to exit; resume later with: $0 resume)"
   CODEX_HOME="$home" codex --sandbox workspace-write -c model_provider=selfhosted -c model="$m" ${1:+"$1"}
+}
+
+cmd_resume() {   # resume a saved chat session: resume [SESSION_ID | --last | --all] [prompt]
+  tunnel_up || die "tunnel not up — run: $0 up"
+  start_proxy
+  local m; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
+  make_codex_home "$m" "$CODEX_HOME_DIR" >/dev/null   # refresh provider/model in the persistent home
+  echo "[resume] model=$m  home=$CODEX_HOME_DIR  args=[${*:-<picker>}]  (sessions are cwd-filtered; add --all for other dirs)"
+  CODEX_HOME="$CODEX_HOME_DIR" codex resume \
+    -c model_provider=selfhosted -c model="$m" -c sandbox_mode="workspace-write" -c approval_policy="never" "$@"
 }
 
 cmd_exec() {
@@ -208,7 +221,8 @@ case "${1:-}" in
   chat)   shift; cmd_chat "${1:-}" ;;
   exec)   shift; cmd_exec "${*:-}" ;;
   run)    tunnel_up || cmd_up; shift; cmd_chat "${1:-}" ;;
+  resume) shift; cmd_resume "$@" ;;
   status) cmd_status ;;
   down)   cmd_down ;;
-  *) echo "usage: CODEX_ENV=<acct> $0 {up|chat [\"task\"]|exec \"task\"|run [\"task\"]|status|down}"; exit 1 ;;
+  *) echo "usage: CODEX_ENV=<acct> $0 {up|chat [\"task\"]|resume [id|--last|--all]|exec \"task\"|run [\"task\"]|status|down}"; exit 1 ;;
 esac
