@@ -162,6 +162,7 @@ cmd_up() {
 
 cmd_chat() {
   tunnel_up || die "tunnel not up — run: $0 up"
+  start_proxy   # idempotent: Codex points at the proxy, so make sure it's running
   local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
   home=$(make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in: the EXIT trap fires after this fn returns, where a local would be unbound under set -u
   echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  (/quit to exit)"
@@ -171,6 +172,7 @@ cmd_chat() {
 cmd_exec() {
   [ -n "${1:-}" ] || die "usage: $0 exec \"<task>\""
   tunnel_up || die "tunnel not up — run: $0 up"
+  start_proxy
   local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
   home=$(CODEX_MCP_SET="${CODEX_MCP_SET_EXEC:-}" make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in (see cmd_chat)
   echo "[exec] model=$m"
