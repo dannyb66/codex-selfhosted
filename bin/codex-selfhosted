@@ -124,11 +124,17 @@ ensure_serving() {
   running=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null)
   if [[ "${running:-0}" =~ ^[1-9][0-9]*$ ]]; then echo "[up] task already running — skipping cold-start wait."; return 0; fi
   echo "[up] waiting for the model to serve (cold start ~10 min)..."
-  local i start
+  local i start t0 el rc
+  t0=$(date +%s)
   for i in $(seq 1 60); do
     start=$(( ($(date +%s) - 90) * 1000 ))
     [ "$(aws logs filter-log-events --log-group-name "$LG" --region "$REGION" --start-time "$start" --filter-pattern '?"Application startup complete" ?"Uvicorn running on http"' --query 'length(events)' --output text 2>/dev/null)" != "0" ] && { echo "[up] model serving."; return 0; }
     [ "$i" = 60 ] && die "timed out waiting for serving (check: $0 status)"
+    if [ $((i % 3)) = 0 ]; then   # ~every 60s: heartbeat so a long cold start never looks hung
+      el=$(( $(date +%s) - t0 ))
+      rc=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].[runningCount,pendingCount]' --output text 2>/dev/null | tr '\t' '/')
+      echo "[up]   ...still warming (${el}s elapsed; task running/pending=${rc:-?}) — normal, not a hang"
+    fi
     sleep 20
   done
 }
