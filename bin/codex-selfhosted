@@ -72,11 +72,12 @@ tunnel_up()   { curl -sf "$BASE/health" >/dev/null 2>&1; }
 served_model(){ curl -sf "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
 
 make_codex_home() {  # $1=served model; $2=optional home dir (default: fresh mktemp/ephemeral). honors CODEX_MCP_SET
-  local m="$1" home="${2:-}" cwd
+  local m="$1" home="${2:-}" cwd tmp
   cwd=$(pwd)
   [ -n "$home" ] || home=$(mktemp -d "${TMPDIR:-/tmp}/codex-selfhosted.XXXXXX")
   mkdir -p "$home"
-  {
+  tmp="$home/.config.toml.$$"   # build in a temp then atomic mv, so a concurrent chat sharing this
+  {                             # persistent home never reads a half-written (e.g. MCP-less) config.toml
     printf 'model = "%s"\n' "$m"
     printf 'model_provider = "selfhosted"\n'
     printf 'model_reasoning_effort = "%s"\n' "$CODEX_EFFORT"
@@ -84,11 +85,12 @@ make_codex_home() {  # $1=served model; $2=optional home dir (default: fresh mkt
     printf 'name = "Self-hosted vLLM"\n'
     printf 'base_url = "%s/v1"\n' "$CODEX_BASE"
     printf 'wire_api = "responses"\n'
-    printf '[tui]\nshow_tooltips = false\n'   # (no history.persistence=none: session rollouts must survive for `resume`)
+    printf '[history]\npersistence = "none"\n'   # command-history only; session rollouts still persist (verified) so `resume` works
+    printf '[tui]\nshow_tooltips = false\n'
     printf '[projects."%s"]\ntrust_level = "trusted"\n' "$cwd"
-  } > "$home/config.toml"
+  } > "$tmp"
   if [ -n "$CODEX_MCP_SET" ] && [ -f "$USER_CODEX_CONFIG" ]; then
-    CODEX_MCP_SET="$CODEX_MCP_SET" python3 - "$USER_CODEX_CONFIG" >> "$home/config.toml" <<'PY'
+    CODEX_MCP_SET="$CODEX_MCP_SET" python3 - "$USER_CODEX_CONFIG" >> "$tmp" <<'PY'
 import os, re, sys
 ids = {x.strip() for x in os.environ.get("CODEX_MCP_SET", "").split(",") if x.strip()}
 lines = open(sys.argv[1]).read().splitlines(keepends=True)
@@ -105,6 +107,7 @@ while i < n:
 sys.stdout.write("".join(out))
 PY
   fi
+  mv -f "$tmp" "$home/config.toml"   # atomic swap: a concurrent reader sees the previous complete file or this one
   echo "$home"
 }
 
