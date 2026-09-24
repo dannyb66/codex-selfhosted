@@ -3,9 +3,14 @@
 # The model is NOT baked; vLLM downloads it from HuggingFace on first boot (~minutes cold).
 FROM vllm/vllm-openai:latest
 
-# curl for health checks; entrypoint + registry.
+# boto3 for the Layer-2 max-warm self-down watchdog (server/self_down.py); inert unless the
+# taskdef sets MAX_WARM_HOURS + SELF_CLUSTER/SELF_SERVICE.
+RUN pip install --no-cache-dir boto3
+
+# entrypoint + registry + self-down helper.
 COPY server/entrypoint-gpu.sh /app/entrypoint-gpu.sh
 COPY server/models.json       /app/models.json
+COPY server/self_down.py      /app/self_down.py
 RUN chmod +x /app/entrypoint-gpu.sh
 
 # Override the base image's api_server entrypoint with our MODEL_KEY-driven launcher.

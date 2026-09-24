@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SelfDownUpdateService",
+      "Effect": "Allow",
+      "Action": ["ecs:UpdateService", "ecs:DescribeServices"],
+      "Resource": "arn:aws:ecs:us-east-2:235391889963:service/dev-cluster-for-web/devci-llm-inference-gpu-service"
+    },
+    {
+      "Sid": "SelfDownScalableTarget",
+      "Effect": "Allow",
+      "Action": ["application-autoscaling:RegisterScalableTarget", "application-autoscaling:DescribeScalableTargets"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SelfDownASG",
+      "Effect": "Allow",
+      "Action": "autoscaling:UpdateAutoScalingGroup",
+      "Resource": "*"
+    }
+  ]
+}
