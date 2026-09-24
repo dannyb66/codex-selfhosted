@@ -15,3 +15,7 @@ crash.log
 /tmp/mfa-env-*.sh
 *.log
 .DS_Store
+
+# python bytecode (from codex-role-proxy)
+__pycache__/
+*.pyc
