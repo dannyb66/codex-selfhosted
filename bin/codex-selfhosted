@@ -75,8 +75,8 @@ resolve_targets() {  # -> "IP EC2" or non-zero
   echo "$ip $ec2"
 }
 
-tunnel_up()   { curl -sf "$BASE/health" >/dev/null 2>&1; }
-served_model(){ curl -sf "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
+tunnel_up()   { curl -sf --max-time 4 "$BASE/health" >/dev/null 2>&1; }   # --max-time: fast-fail if a stale tunnel half-opens the port
+served_model(){ curl -sf --max-time 6 "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
 
 make_codex_home() {  # $1=served model; $2=optional home dir (default: fresh mktemp/ephemeral). honors CODEX_MCP_SET
   local m="$1" home="${2:-}" cwd tmp
@@ -153,6 +153,7 @@ open_tunnel() {
   ip=${tg% *}; ec2=${tg#* }
   echo "[up] opening shared SSM tunnel  localhost:$PORT -> $ip:$PORT via $ec2 ..."
   [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+  lsof -ti "TCP:$PORT" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true   # reap any stale session-manager-plugin still holding :$PORT before rebinding
   nohup aws ssm start-session --target "$ec2" \
     --document-name AWS-StartPortForwardingSessionToRemoteHost \
     --parameters "host=$ip,portNumber=$PORT,localPortNumber=$PORT" --region "$REGION" >"$TLOG" 2>&1 &
@@ -262,6 +263,7 @@ scale_to_zero() {   # the actual down: scale service+ASG to 0 and close tunnel/p
   aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$ASG" --min-size 0 --desired-capacity 0 --region "$REGION" 2>/dev/null
   [ -f "$REAPER_PIDFILE" ] && { kill "$(cat "$REAPER_PIDFILE")" 2>/dev/null; rm -f "$REAPER_PIDFILE"; }   # no-op if the reaper itself is calling
   [ -f "$PIDFILE" ] && { kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; }
+  lsof -ti "TCP:$PORT" -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true   # reap the session-manager-plugin child that keeps :$PORT open after the aws parent dies
   [ -f "$PROXY_PIDFILE" ] && { kill "$(cat "$PROXY_PIDFILE")" 2>/dev/null; rm -f "$PROXY_PIDFILE"; }
 }
 
