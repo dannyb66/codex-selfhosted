@@ -1,0 +1,32 @@
+# Qwen3.8-27B-FP8 + MTP — the fast production config (devci taskdef :15, LT v5)
+#
+# Benchmarked single-stream decode on g6e.xlarge (L40S 48GB), coding prompts, effort=medium:
+#   AWQ-INT4 + --enforce-eager (td :13) ...... ~14 tok/s   (1x)
+#   FP8 + CUDA graphs, no MTP  (td :14) ...... ~27 tok/s   (1.9x)
+#   FP8 + MTP  (td :15, THIS) ................ ~55-59 tok/s (~4x), MTP acceptance ~78%
+#
+# vLLM serve command (entryPoint override; from the official vLLM recipe for Qwen3.8-27B-FP8):
+python3 -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen3.8-27B-FP8 \
+  --served-model-name qwen3.8-27b \
+  --max-model-len 65536 \
+  --max-num-seqs 16 \
+  --gpu-memory-utilization 0.85 \
+  --enable-prefix-caching \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
+  --trust-remote-code \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+  --host 0.0.0.0 --port 8000
+#
+# DEPLOY REQUIREMENTS / GOTCHAS:
+# - DISK: needs a >=200GB root volume (LT v5). The qwen3_5_mtp method downloads a large speculator/
+#   target model ON TOP of the 28GB FP8 checkpoint; a 100GB root overflows mid-load with
+#   "No space left on device: /root/.cache/huggingface" (td :15 failed on 100GB, served on 200GB).
+# - MTP method name is qwen3_5_mtp (NOT "mtp"); "mtp" is silently ignored (loads but never drafts).
+# - MTP requires "enforce_eager": true in the spec config -> CUDA graphs and MTP are mutually exclusive.
+#   MTP (eager) still beats CUDA-graphs-alone here (~59 vs ~27), so MTP is the pick.
+# - Effort: Qwen3.8 (qwen3 reasoning parser) accepts xhigh|medium|low, NOT high. xhigh is very verbose
+#   (~minutes/answer at these speeds); medium is the interactive sweet spot.
+# - Non-fatal startup warnings seen: "no KV cache group ... draft model's" and
+#   "max_num_scheduled_tokens is set to 2048" (tuning hint; could raise --max-num-batched-tokens).
+# - Rollbacks: td :14 (FP8+graphs), td :13 (AWQ), td :12 (coder-30b); LT v2 (g5.2xlarge/A10G).
