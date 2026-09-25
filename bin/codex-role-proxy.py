@@ -51,9 +51,41 @@ def _rewrite(body: bytes) -> bytes:
                 it["role"] = "system"; changed = True
             if isinstance(it.get("content"), list):  # vLLM rejects 'input_text' content chunks
                 it["content"] = _flatten(it["content"]); changed = True
-
     fix(d.get("input"))       # Responses API input items
     fix(d.get("messages"))    # Chat Completions messages
+
+    # vLLM's Responses API rejects `reasoning` input items (Codex echoes the model's own prior reasoning
+    # back on the next turn: "Unsupported input item type: reasoning"). Strip them.
+    inp0 = d.get("input")
+    if isinstance(inp0, list):
+        kept = [it for it in inp0 if not (isinstance(it, dict) and it.get("type") == "reasoning")]
+        if len(kept) != len(inp0):
+            d["input"] = kept; changed = True
+
+    # Qwen3.8's chat template requires a SINGLE system message at the very beginning. Codex sends its
+    # base prompt in the top-level `instructions` field AND a developer->system item inside the
+    # conversation -> two system sources -> "System message must be at the beginning".
+    # Responses API: fold the conversation's system content into `instructions` (which vLLM emits as
+    # the single leading system message) and drop it from `input`.
+    inp = d.get("input")
+    if isinstance(inp, list):
+        sys_content = [str(it.get("content", "")) for it in inp
+                       if isinstance(it, dict) and it.get("role") == "system" and it.get("content")]
+        if sys_content:
+            existing = str(d.get("instructions") or "")
+            d["instructions"] = "\n\n".join(([existing] if existing else []) + sys_content)
+            d["input"] = [it for it in inp if not (isinstance(it, dict) and it.get("role") == "system")]
+            changed = True
+    # Chat Completions has no `instructions` field -> hoist+merge systems into one leading message.
+    msgs = d.get("messages")
+    if isinstance(msgs, list):
+        sys_items = [it for it in msgs if isinstance(it, dict) and it.get("role") == "system"]
+        if sys_items and (len(sys_items) > 1 or msgs[0] is not sys_items[0]):
+            rest = [it for it in msgs if not (isinstance(it, dict) and it.get("role") == "system")]
+            merged = "\n\n".join(str(s.get("content", "")) for s in sys_items if s.get("content"))
+            d["messages"] = [{"role": "system", "content": merged}] + rest
+            changed = True
+
     return json.dumps(d).encode() if changed else body
 
 
