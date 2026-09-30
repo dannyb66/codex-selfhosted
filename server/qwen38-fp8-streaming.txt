@@ -1,0 +1,54 @@
+# Qwen3.8-27B-FP8 + MTP via S3 WEIGHT STREAMING — the fast, free-cold-start config
+# (supersedes the HF-download :15 and the baked-image :17; validated live on awsdev 2026-09-29)
+#
+# WHY: the baked image (:17) made cold starts SLOWER (34 GB image pull) and the HF download (:15)
+# billed ~28 GB through NAT every cold start. Instead, host the model in our own in-region S3 and
+# STREAM it into the GPU with vLLM's Run:ai Model Streamer. In-region S3 (gateway endpoint) is FREE
+# and the streamed load is FAST — with zero decode-throughput cost.
+#
+# ── ARTIFACTS ────────────────────────────────────────────────────────────────
+# S3 (generic multi-model bucket, us-east-2):  s3://dev-trekhealth-llm-models/<model-key>/
+#     qwen38-27b-fp8/  = 81 objects, 30.9 GB (layers-*.safetensors + outside.safetensors +
+#                        mtp.safetensors[MTP head] + model.safetensors.index.json + tokenizer)
+# Image (ECR):  devci-llm-inference:gpu-stream  = 8.97 GB  (vs baked gpu-qwen38fp8 = 33.96 GB)
+#     = Dockerfile.gpu-stream (base vllm/vllm-openai:latest + transformers<5.17 + runai-model-streamer[-s3], NO baked model)
+# Task role dev-td-llm-inference-taskRole: + inline policy read-model-bucket (s3:GetObject/ListBucket/GetBucketLocation on the bucket)
+# Taskdef family devci-llm-inference-gpu:  :18 = stream no-MTP,  :19 = stream + MTP (production)
+#
+# ── SERVE COMMAND (taskdef :19 entryPoint; only the model-load path differs from :15) ──
+python3 -m vllm.entrypoints.openai.api_server \
+  --model s3://dev-trekhealth-llm-models/qwen38-27b-fp8 \
+  --load-format runai_streamer \
+  --served-model-name qwen3.8-27b \
+  --max-model-len 65536 --max-num-seqs 16 --gpu-memory-utilization 0.85 --enable-prefix-caching \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --trust-remote-code \
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+  --host 0.0.0.0 --port 8000
+# env: RUNAI_STREAMER_MEMORY_LIMIT=17179869184 (16 GiB CPU read buffer, safely under the 28 GiB task mem on g6e.xlarge/32 GB)
+#
+# ── VALIDATED LIVE (awsdev DEVCI, g6e.xlarge/L40S, 2026-09-29) ──
+#   Model load (streamed S3->GPU):  no-MTP 36.1 s  |  MTP 53.8 s   (vs baked-image load 100.9 s)
+#   HF download:                    ZERO  (grep downloading/huggingface = empty; in-region S3 gateway = free)
+#   MTP head (mtp.safetensors):     streamed from S3, NOT HF  (the speculative path uses the runai_streamer loader)
+#   Decode throughput (MTP):        60 tok/s  (matches/beats the :15 HF-download baseline of ~55-59)
+#   MTP draft acceptance:           84.8-96.4%,  acceptance length 3.89 / 4  (num_speculative_tokens=3)
+#   no-MTP baseline (eager):        ~14 tok/s  ->  MTP is a 4.3x speedup (proves it is really drafting)
+#   Warm-instance serve:            no-MTP 328 s (incl. fresh 9 GB image pull + 36 s load + warmup)
+#   Cold-start (est.):              ~+180 s boot -> ~8.5-9 min  (vs :15 HF-download ~17 min)  [components measured; not a fresh end-to-end run]
+#   Cost:                           S3 storage ~$0.66/mo (vs baked-image ECR ~$3.4/mo); ZERO per-cold-start NAT
+#
+# ── DEPLOYMENT DEADLOCK FIX (applied to the live service; MUST be in the service def / IaC) ──
+#   The single-GPU service (ASG max=1) shipped with default rolling config (maxPercent=200) + AZ Rebalancing.
+#   On any taskdef change ECS tried to run 2 tasks on 1 GPU -> the old task grabbed the GPU while the new one
+#   starved in PROVISIONING forever. Fix:
+#     aws ecs update-service ... --availability-zone-rebalancing DISABLED \
+#         --deployment-configuration "maximumPercent=100,minimumHealthyPercent=0"
+#   (AZ Rebalancing requires maxPercent>100, and is meaningless for a 1-task service — disable it to allow max=100.)
+#
+# ── GOTCHAS ──
+#   - MTP speculator WARMUP adds ~2-3 min after the model load before "Application startup complete" (longer than no-MTP);
+#     the SSM tunnel will "Connection to destination port failed" until vLLM binds :8000 — that's warmup, not an error.
+#   - Model is multimodal (Qwen3VL); ~20 s multi-modal warmup on load. Add --language-model-only if vision is unneeded (future lever).
+#   - runai_streamer reads the standard model.safetensors.index.json; the custom shard layout (layers-N/outside/mtp) works as-is.
+#   - Disk: streaming avoids the HF-download disk staging, so the 200 GB root (LT v5) can likely drop to 100 GB (unverified — future).
+#   - Rollbacks intact: :17 (baked), :15 (HF+MTP), :14 (FP8+graphs), :13 (AWQ); LT v5 (200 GB), v4 (on-demand g6e), v2 (g5/A10G).

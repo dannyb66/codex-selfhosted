@@ -27,6 +27,12 @@ out("MODEL_MAX_LEN", m.get("max_model_len", 32768))
 out("MODEL_QUANT", m.get("quant", ""))
 out("KV_DTYPE", m.get("kv_cache_dtype", ""))
 out("REASONING_PARSER", m.get("reasoning_parser", ""))
+out("MODEL_URI", m.get("model_uri", ""))
+out("LOAD_FORMAT", m.get("load_format", ""))
+out("SPEC_CONFIG", m.get("speculative_config", ""))
+out("ENFORCE_EAGER", "1" if m.get("enforce_eager") else "")
+out("TRUST_REMOTE", "1" if m.get("trust_remote_code") else "")
+out("GPU_UTIL_MODEL", m.get("gpu_memory_utilization", ""))
 PY
 )"
 else
@@ -34,13 +40,14 @@ else
   HF_MODEL="${MODEL_NAME:?set MODEL_KEY or MODEL_NAME}"
   SERVED_NAME="$MODEL_NAME"; TOOL_PARSER="${TOOL_PARSER:-}"
   MODEL_MAX_LEN="${MAX_MODEL_LEN:-32768}"; MODEL_QUANT="${QUANT:-}"; KV_DTYPE=""; REASONING_PARSER=""
+  MODEL_URI=""; LOAD_FORMAT=""; SPEC_CONFIG=""; ENFORCE_EAGER=""; TRUST_REMOTE=""; GPU_UTIL_MODEL=""
 fi
 
-QUANT_FLAG="";     [ -n "$MODEL_QUANT" ] && [ "$MODEL_QUANT" != "none" ] && QUANT_FLAG="--quantization $MODEL_QUANT"
-TOOL_FLAGS="";     [ -n "$TOOL_PARSER" ] && TOOL_FLAGS="--enable-auto-tool-choice --tool-call-parser $TOOL_PARSER"
-[ -n "$REASONING_PARSER" ] && TOOL_FLAGS="$TOOL_FLAGS --reasoning-parser $REASONING_PARSER"
-KV_FLAG="";        [ -n "$KV_DTYPE" ] && [ "$KV_DTYPE" != "auto" ] && KV_FLAG="--kv-cache-dtype $KV_DTYPE"
-GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.92}"
+# model source: prefer model_uri (e.g. s3://<bucket>/<model> for runai_streamer), env-expanded; else hf_model
+MODEL_ARG="$HF_MODEL"
+[ -n "$MODEL_URI" ] && MODEL_ARG=$(eval echo "$MODEL_URI")
+# per-model gpu util overrides the env default
+GPU_UTIL="${GPU_UTIL_MODEL:-${GPU_MEMORY_UTILIZATION:-0.92}}"
 PORT="${VLLM_PORT:-8000}"
 
 # Layer-2 backstop: absolute max-warm self-down. If MAX_WARM_HOURS>0 (taskdef), a background timer
@@ -61,14 +68,17 @@ if [ "${MAX_WARM_HOURS:-0}" != "0" ] && [ -n "${SELF_CLUSTER:-}" ]; then
   echo "[max-warm] backstop armed: self-down after ${MAX_WARM_HOURS}h"
 fi
 
-echo "starting vLLM: model=$HF_MODEL served=$SERVED_NAME maxlen=$MODEL_MAX_LEN quant=${MODEL_QUANT:-none} parser=${TOOL_PARSER:-none} kv=${KV_DTYPE:-auto} reasoning=${REASONING_PARSER:-none}"
-# shellcheck disable=SC2086
-exec python3 -m vllm.entrypoints.openai.api_server \
-  --model "$HF_MODEL" \
-  --served-model-name "$SERVED_NAME" \
-  $QUANT_FLAG \
-  --max-model-len "$MODEL_MAX_LEN" \
-  --gpu-memory-utilization "$GPU_UTIL" \
-  $KV_FLAG \
-  $TOOL_FLAGS \
-  --host 0.0.0.0 --port "$PORT"
+echo "starting vLLM: model=$MODEL_ARG served=$SERVED_NAME maxlen=$MODEL_MAX_LEN quant=${MODEL_QUANT:-none} load_format=${LOAD_FORMAT:-default} parser=${TOOL_PARSER:-none} reasoning=${REASONING_PARSER:-none} kv=${KV_DTYPE:-auto} spec=${SPEC_CONFIG:+mtp} eager=${ENFORCE_EAGER:+yes}"
+# build argv as an array so the --speculative-config JSON passes as ONE arg (no word-splitting)
+args=( --model "$MODEL_ARG" --served-model-name "$SERVED_NAME"
+       --max-model-len "$MODEL_MAX_LEN" --gpu-memory-utilization "$GPU_UTIL"
+       --host 0.0.0.0 --port "$PORT" )
+[ -n "$MODEL_QUANT" ] && [ "$MODEL_QUANT" != "none" ] && args+=( --quantization "$MODEL_QUANT" )
+[ -n "$LOAD_FORMAT" ]      && args+=( --load-format "$LOAD_FORMAT" )
+[ -n "$KV_DTYPE" ] && [ "$KV_DTYPE" != "auto" ] && args+=( --kv-cache-dtype "$KV_DTYPE" )
+[ -n "$TOOL_PARSER" ]      && args+=( --enable-auto-tool-choice --tool-call-parser "$TOOL_PARSER" )
+[ -n "$REASONING_PARSER" ] && args+=( --reasoning-parser "$REASONING_PARSER" )
+[ -n "$TRUST_REMOTE" ]     && args+=( --trust-remote-code )
+[ -n "$ENFORCE_EAGER" ]    && args+=( --enforce-eager )
+[ -n "$SPEC_CONFIG" ]      && args+=( --speculative-config "$SPEC_CONFIG" )
+exec python3 -m vllm.entrypoints.openai.api_server "${args[@]}"

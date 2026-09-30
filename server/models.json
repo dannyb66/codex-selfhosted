@@ -24,6 +24,23 @@
       "gpu_min": 1,
       "enforce_eager": true,
       "gpu_memory_utilization": 0.95
+    },
+    "qwen38-stream": {
+      "_note": "Qwen3.8-27B-FP8 + MTP, STREAMED from S3 via Run:ai Model Streamer (no HF download; in-region S3 gateway = free + fast, ~36s load, zero decode-throughput cost). Needs g6e.xlarge/L40S (Ada sm_89 for FP8). Host the FP8 snapshot at model_uri and grant the task role s3:GetObject on the bucket. Validated live 2026-09-29: 60 tok/s, ~85% MTP accept. See server/qwen38-fp8-streaming.txt.",
+      "hf_model": "Qwen/Qwen3.8-27B-FP8",
+      "model_uri": "s3://${MODEL_S3_BUCKET}/qwen38-27b-fp8",
+      "load_format": "runai_streamer",
+      "served_name": "qwen3.8-27b",
+      "tool_parser": "qwen3_coder",
+      "reasoning_parser": "qwen3",
+      "max_model_len": 65536,
+      "quant": "fp8",
+      "trust_remote_code": true,
+      "enforce_eager": true,
+      "gpu_memory_utilization": 0.85,
+      "speculative_config": "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":3,\"enforce_eager\":true}",
+      "instance": "g6e.xlarge",
+      "gpu_min": 1
     }
   }
 }
