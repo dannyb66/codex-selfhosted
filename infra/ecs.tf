@@ -32,10 +32,16 @@ resource "aws_ecs_task_definition" "this" {
       portMappings = [
         { containerPort = var.container_port, hostPort = var.container_port, protocol = "tcp" }
       ]
-      environment = [
-        { name = "MODEL_KEY", value = var.model_key },
-        { name = "PORT", value = tostring(var.container_port) }
-      ]
+      # Streaming models (load_format=runai_streamer) read MODEL_S3_BUCKET (expanded into the
+      # registry's model_uri) + an optional RUNAI_STREAMER_MEMORY_LIMIT; both inert when unset.
+      environment = concat(
+        [
+          { name = "MODEL_KEY", value = var.model_key },
+          { name = "PORT", value = tostring(var.container_port) }
+        ],
+        var.model_s3_bucket != "" ? [{ name = "MODEL_S3_BUCKET", value = var.model_s3_bucket }] : [],
+        var.runai_streamer_memory_limit != "" ? [{ name = "RUNAI_STREAMER_MEMORY_LIMIT", value = var.runai_streamer_memory_limit }] : []
+      )
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -53,6 +59,15 @@ resource "aws_ecs_service" "this" {
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.this.arn
   desired_count   = 0
+
+  # Single-GPU safety: this service runs at most ONE task (max_gpu_instances=1, 1 GPU per box).
+  # The ECS default rolling config (max 200% / min 100%) + AZ Rebalancing would try to start a 2nd
+  # task on any taskdef change and deadlock in PROVISIONING forever (no 2nd GPU to place it on).
+  # Cap at one task and stop-before-start. AZ Rebalancing must be DISABLED to allow maximum_percent
+  # <= 100 (and is meaningless for a 1-task service). Needs AWS provider >= 5.82 for the arg.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+  availability_zone_rebalancing      = "DISABLED"
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.gpu.name

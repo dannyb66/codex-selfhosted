@@ -45,7 +45,13 @@ fi
 
 # model source: prefer model_uri (e.g. s3://<bucket>/<model> for runai_streamer), env-expanded; else hf_model
 MODEL_ARG="$HF_MODEL"
-[ -n "$MODEL_URI" ] && MODEL_ARG=$(eval echo "$MODEL_URI")
+if [ -n "$MODEL_URI" ]; then
+  MODEL_ARG=$(eval echo "$MODEL_URI")   # expand ${MODEL_S3_BUCKET} etc. from the task env
+  case "$MODEL_ARG" in
+    *'${'*)  echo "FATAL: model_uri '$MODEL_URI' has an unexpanded variable -> '$MODEL_ARG'; set MODEL_S3_BUCKET in the task env" >&2; exit 4 ;;
+    s3:///*) echo "FATAL: model_uri expanded to '$MODEL_ARG' (empty bucket segment); set MODEL_S3_BUCKET" >&2; exit 4 ;;
+  esac
+fi
 # per-model gpu util overrides the env default
 GPU_UTIL="${GPU_UTIL_MODEL:-${GPU_MEMORY_UTILIZATION:-0.92}}"
 PORT="${VLLM_PORT:-8000}"

@@ -20,9 +20,21 @@ variable "gpu_instance_type" {
 }
 
 variable "model_key" {
-  description = "MODEL_KEY passed to the container; the server's models.json resolves it to a HF model + parser + flags."
+  description = "MODEL_KEY passed to the container; the server's models.json resolves it to a HF model + parser + flags. NOTE: streaming models (e.g. qwen38-stream) also need model_s3_bucket set, gpu_instance_type=g6e.xlarge, and container_memory=28672."
   type        = string
   default     = "instruct-14b"
+}
+
+variable "model_s3_bucket" {
+  description = "S3 bucket holding model weights for runai_streamer (the qwen38-stream registry entry streams from s3://<this>/qwen38-27b-fp8). Empty = HF-download models only. When set: the container gets a MODEL_S3_BUCKET env + the task role gets s3:GetObject on this bucket. Keep the bucket in aws_region so the S3 gateway endpoint keeps the read free (no NAT)."
+  type        = string
+  default     = ""
+}
+
+variable "runai_streamer_memory_limit" {
+  description = "RUNAI_STREAMER_MEMORY_LIMIT (bytes) — caps the Run:ai streamer's CPU read buffer under container_memory. Only used by streaming (load_format=runai_streamer) models. Empty = unset (streamer default). For the ~29GB FP8 checkpoint on a 28672-MiB task, ~16GiB (17179869184) is safe."
+  type        = string
+  default     = ""
 }
 
 variable "image_tag" {
@@ -50,7 +62,7 @@ variable "container_cpu" {
 }
 
 variable "container_memory" {
-  description = "Task memory (MiB). Leave headroom below the instance RAM."
+  description = "Task memory (MiB). Leave headroom below the instance RAM. Default 14336 suits instruct-14b on a g5. STREAMING models (qwen38-stream) need 28672 on a g6e.xlarge (32GB RAM) — the runai_streamer buffers weights in CPU RAM, and 14336 OOM-kills mid-load."
   type        = string
   default     = "14336"
 }

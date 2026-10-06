@@ -9,7 +9,7 @@ Three layers:
 - **`server/`** — a vLLM-only GPU image (Dockerfile + `MODEL_KEY` registry + build).
 - **`infra/`** — Terraform to stand up the GPU stack (ASG + capacity provider + ECS + IAM + ECR) in a new account.
 
-The GPU **scales to zero** when idle; you `up` it for a coding session (~10 min cold start) and `down` it after.
+The GPU **scales to zero** when idle; you `up` it for a coding session (~10–12 min cold start) and `down` it after.
 
 ---
 
@@ -99,13 +99,13 @@ Each env gets its own `/tmp/mfa-env-<env>.sh` and tunnel pidfile, so sessions do
 
 - **`instruct-14b`** — Qwen2.5-14B-Instruct-AWQ on **g5.xlarge (A10G 24GB)**. Tool-calls with Codex; curated MCP only (32k).
 - **`devstral-small-2`** — Devstral Small 2 24B (Mistral3), AWQ ~15GiB. Needs **g5.2xlarge** (A10G 24GB VRAM **+ 32GB RAM** — the 16GB weight file must mmap into >16GB host RAM; g5.xlarge's 16GB OOMs). Strong agentic coder — **but not usable from Codex** (see below).
-- **`coder-30b`** — Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active), AWQ **16.85 GiB**. Fits **g5.2xlarge (A10G 24GB)** at ~16–32k ctx / 1–2 sessions (fp8 KV, ~3.7GiB headroom); **g6e.xlarge (L40S 48GB)** for full MCP + more concurrency. Standard MoE (Ampere-safe) + **Codex-native tool format**. *(Currently the recommended Codex model — proven working on g5.2xlarge.)*
+- **`coder-30b`** — Qwen3-Coder-30B-A3B (Qwen3 MoE, 128 experts/8 active), AWQ **16.85 GiB**. Fits **g5.2xlarge (A10G 24GB)** at ~16–32k ctx / 1–2 sessions (fp8 KV, ~3.7GiB headroom); **g6e.xlarge (L40S 48GB)** for full MCP + more concurrency. Standard MoE (Ampere-safe) + **Codex-native tool format**. *(A strong Codex model, proven on g5.2xlarge.)*
+- **`qwen38-stream`** — **Qwen3.8-27B-FP8 + MTP** on **g6e.xlarge (L40S 48GB)**, weights **streamed from S3** (not HF-downloaded). The strongest self-hosted coder here: ~60 tok/s decode (MTP speculative, ~85% draft acceptance), Codex-native tool format. Needs the [weight-streaming setup](#weight-streaming) below. *(Deployed + validated on awsdev 2026-09.)*
 
-> **Future upgrade — Qwen3.8-27B (needs a GPU upgrade too):** successor to Qwen3.6-27B, same **gated-DeltaNet
-> hybrid** class. Its ~20 GB weights leave no KV room on the 24 GB A10G, and the DeltaNet/MTP kernels want
-> **Ada+ (sm_89)** — so it needs **g6e.xlarge (L40S 48GB)** (`gpu_instance_type = "g6e.xlarge"` in Terraform),
-> **not** the current g5.2xlarge/A10G box. Before deploying: verify the exact AWQ size + a vLLM/transformers
-> combo that supports the Qwen3.8 arch (same due-diligence as the models above; watch the qwen3-parser bug #58147).
+> **Qwen3.8-27B is now deployed** (`qwen38-stream`) — the gated-DeltaNet hybrid successor to Qwen3.6-27B.
+> Its ~20GB FP8 weights + DeltaNet/MTP kernels need **Ada+ (sm_89)**, so it runs on **g6e.xlarge (L40S 48GB)**,
+> not the g5/A10G box; it loads by **streaming from S3** instead of a HF download (see [Weight streaming](#weight-streaming)).
+> Watch the qwen3-parser bug #58147 on vLLM upgrades.
 
 Switch via the `model_key` Terraform var (redeploys the taskdef) — no code change. `kv_cache_dtype=fp8`
 roughly doubles the number of concurrent sessions the GPU holds.
@@ -126,6 +126,49 @@ Codex speaks the OpenAI Responses API + OpenAI tool format. Two layers matter:
      `justification`/`sandbox_permissions` tool-schema mismatch. Devstral is built for **OpenHands /
      mini-SWE-agent / Mistral `vibe`**, not Codex — drive it with those. For **Codex** on self-hosted, use
      **`coder-30b`** (Qwen3-Coder-30B-A3B) — it fits the same g5.2xlarge box and speaks Codex's tool format.
+
+---
+
+## Weight streaming
+
+Large models (the FP8 `qwen38-stream`) load their weights by **streaming from S3 straight into GPU
+memory** via vLLM's [Run:ai Model Streamer](https://docs.vllm.ai/en/latest/models/extensions/runai_model_streamer/)
+(`--load-format runai_streamer --model s3://<bucket>/<key>`) instead of downloading from HuggingFace.
+Why it wins:
+
+- **Free + fast.** An in-region bucket is read through the VPC's **S3 gateway endpoint** — no NAT
+  egress charge — and the streamer saturates bandwidth with concurrent reads: ~57 s to load a 29 GB
+  FP8 checkpoint, with no download-to-disk step (a 100 GB root is plenty).
+- **Smaller image.** The model is NOT baked in (`gpu-stream` ≈ 9 GB vs ~34 GB baked), so the image
+  pull is quick too.
+
+**Measured (g6e.xlarge/L40S, awsdev 2026-09):** cold start **~11.5 min** (launch→served, incl. the MTP
++ CUDA-graph warmup) vs ~17 min for the HF-download variant; **60 tok/s** decode, **~85 %** MTP draft
+acceptance; **zero** HF download / NAT cost.
+
+**Setup:**
+1. Put the model's HF snapshot in an S3 bucket **in `aws_region`** (so the gateway endpoint keeps the
+   read free): `aws s3 cp <snapshot-dir> s3://<bucket>/qwen38-27b-fp8/ --recursive`.
+2. Build + push the streaming image: `docker build -f server/Dockerfile.gpu-stream .` → tag `gpu-stream`.
+3. Terraform: set `model_s3_bucket`, `model_key = "qwen38-stream"`, `gpu_instance_type = "g6e.xlarge"`,
+   `container_memory = "28672"`, `image_tag = "gpu-stream"` (see `terraform.tfvars.example`). The task
+   role gets `s3:GetObject` on the bucket automatically when `model_s3_bucket` is set.
+
+> **Proven path vs this one.** The numbers above were validated with a **taskdef `entryPoint` override**
+> carrying the exact `vllm` command — recorded in **[`server/qwen38-fp8-streaming.txt`](server/qwen38-fp8-streaming.txt)**,
+> the source of truth. The `MODEL_KEY=qwen38-stream` registry path (resolved by `entrypoint-gpu.sh`) is
+> the portable equivalent but has **not** been run end-to-end; its generated serve command is close but
+> not identical (e.g. omits `--max-num-seqs`/`--enable-prefix-caching`). Bring up a new box from the
+> override command first, confirm parity, then switch to the registry.
+
+### Single-GPU deploy config (important)
+
+A one-GPU service (`max_gpu_instances = 1`) must run **at most one task**, or a taskdef change
+deadlocks: ECS's default rolling config (max 200 %) tries to start a 2nd task on the single GPU while
+the old one still holds it, and the new task sits in `PROVISIONING` forever. `infra/ecs.tf` pins the
+service to `deployment_maximum_percent = 100` / `minimum_healthy_percent = 0` with
+`availability_zone_rebalancing = "DISABLED"` (AZ Rebalancing requires max > 100 and is pointless for a
+single task; needs AWS provider ≥ 5.82). Apply the same if you ever deploy this service by hand.
 
 ---
 

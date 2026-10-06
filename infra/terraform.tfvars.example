@@ -11,6 +11,16 @@ image_tag         = "gpu"
 max_gpu_instances = 2
 use_spot          = false # true = ~65% cheaper, interruptible
 
+# --- Streaming model (Qwen3.8-27B-FP8 + MTP, weights streamed from S3) — overrides the block above ---
+# model_key                   = "qwen38-stream"
+# gpu_instance_type           = "g6e.xlarge"     # L40S 48GB, Ada sm_89 (required for FP8 + MTP kernels)
+# image_tag                   = "gpu-stream"      # runai_streamer image (no baked model)
+# container_memory            = "28672"           # streamer buffers weights in CPU RAM — 14336 OOM-kills
+# model_s3_bucket             = "my-llm-models"   # in aws_region; holds qwen38-27b-fp8/ (free via S3 gateway)
+# runai_streamer_memory_limit = "17179869184"     # 16 GiB CPU read buffer, under container_memory
+# NOTE: the PROVEN serve config used a taskdef entryPoint override (see server/qwen38-fp8-streaming.txt);
+#       this MODEL_KEY/registry path is the portable equivalent but has NOT been run end-to-end yet.
+
 # --- Networking: OPTION A — reuse an existing VPC (recommended) ---
 create_network = false
 vpc_id         = "vpc-xxxxxxxx"
