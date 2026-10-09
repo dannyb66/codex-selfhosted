@@ -24,22 +24,32 @@ set -uo pipefail
 
 CODEX_ENV="${CODEX_ENV:-default}"
 CFG="${CODEX_SELFHOSTED_CONFIG:-$HOME/.config/codex-selfhosted/$CODEX_ENV.env}"
-EXAMPLE_CFG="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/config.example.env"
+_REPO="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+EXAMPLE_CFG="$_REPO/config.example.env"
+DEFAULT_CFG="$_REPO/config.default.env"
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# `init` scaffolds the per-account config; it runs BEFORE the preflight (it creates what the
-# preflight needs). Idempotent — never clobbers an existing env file.
+# `init` scaffolds the per-account config; it runs BEFORE the preflight (it creates what the preflight
+# needs). Idempotent — never clobbers an existing env file. The 'default' env seeds from the committed
+# config.default.env (the reference awsdev deployment, ready to use except AWS_PROFILE); named envs seed
+# from the generic config.example.env (placeholders to fill from 'terraform output').
 cmd_init() {
   mkdir -p "$(dirname "$CFG")"
+  local src="$EXAMPLE_CFG"
+  [ "$CODEX_ENV" = "default" ] && [ -f "$DEFAULT_CFG" ] && src="$DEFAULT_CFG"
   if [ -f "$CFG" ]; then
     echo "config already exists (not overwriting): $CFG"
   else
-    [ -f "$EXAMPLE_CFG" ] || die "example config not found: $EXAMPLE_CFG"
-    cp "$EXAMPLE_CFG" "$CFG" && chmod 600 "$CFG" && echo "created $CFG"
+    [ -f "$src" ] || die "template not found: $src"
+    cp "$src" "$CFG" && chmod 600 "$CFG" && echo "created $CFG (from $(basename "$src"))"
   fi
-  echo "Next: edit $CFG — set AWS_PROFILE + AWS_REGION, and ECS_CLUSTER/ECS_SERVICE/ASG_NAME/LOG_GROUP"
-  echo "      (from 'terraform output', or your existing deployment). Then:"
-  echo "      source bin/aws-mfa.sh <mfa-code>  &&  bin/codex-selfhosted up"
+  if [ "$src" = "$DEFAULT_CFG" ]; then
+    echo "Pre-filled for the reference awsdev deployment — just set AWS_PROFILE in $CFG to your local"
+    echo "'aws configure' profile for that account. Then: source bin/aws-mfa.sh <code> && bin/codex-selfhosted up"
+  else
+    echo "Next: edit $CFG — set AWS_PROFILE + AWS_REGION, and ECS_CLUSTER/ECS_SERVICE/ASG_NAME/LOG_GROUP"
+    echo "      (from 'terraform output'). Then: source bin/aws-mfa.sh <code> && bin/codex-selfhosted up"
+  fi
 }
 [ "${1:-}" = "init" ] && { cmd_init; exit $?; }
 

@@ -33,8 +33,8 @@ The GPU **scales to zero** when idle; you `up` it for a coding session (~10–12
 
 ```bash
 git clone https://github.com/dannyb66/codex-selfhosted && cd codex-selfhosted
-bin/codex-selfhosted init           # creates ~/.config/codex-selfhosted/default.env (prints what to edit)
-# edit that file: AWS_PROFILE + AWS_REGION, and ECS_CLUSTER/ECS_SERVICE/ASG_NAME/LOG_GROUP (`terraform output`)
+bin/codex-selfhosted init           # creates ~/.config/codex-selfhosted/default.env — PRE-FILLED for the reference awsdev deployment
+# set AWS_PROFILE in that file to your local `aws configure` profile for the account — the rest is ready
 
 source bin/aws-mfa.sh 123456        # SOURCE it: 6-digit MFA code -> /tmp/mfa-env-default.sh (AWS_* only)
 bin/codex-selfhosted up             # warm the GPU + open the shared SSM tunnel (~10–12 min cold)
@@ -42,8 +42,10 @@ bin/codex-selfhosted chat           # interactive, streaming — open this in as
 bin/codex-selfhosted down           # scale to $0 when done
 ```
 
-> Single account? Use the default env as above — **no `CODEX_ENV` needed**. For multiple accounts, give
-> each its own env name (`CODEX_ENV=prod bin/codex-selfhosted init`, …) — see [Multi-account](#multi-account).
+> The default env targets the reference awsdev deployment (`config.default.env`), so `init` is ready
+> after one line (`AWS_PROFILE`), no `CODEX_ENV` needed. **Standing up your own stack?**
+> `CODEX_ENV=<name> bin/codex-selfhosted init` seeds the generic `config.example.env` instead — fill
+> AWS + ECS names from `terraform output`. See [Multi-account](#multi-account).
 
 `chat` = the interactive Codex TUI (streams live). `exec "task"` = one-shot automation. `status` = state.
 Concurrency is handled by vLLM (continuous batching) over **one shared tunnel** — every terminal shares it;

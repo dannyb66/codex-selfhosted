@@ -1,6 +1,7 @@
-# local per-account configs (keep only the example)
+# local per-account configs (keep the committed templates)
 *.env
 !config.example.env
+!config.default.env
 .config/
 
 # terraform
