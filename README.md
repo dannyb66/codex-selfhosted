@@ -33,14 +33,17 @@ The GPU **scales to zero** when idle; you `up` it for a coding session (~10–12
 
 ```bash
 git clone https://github.com/dannyb66/codex-selfhosted && cd codex-selfhosted
-cp config.example.env ~/.config/codex-selfhosted/dev.env    # edit: AWS_PROFILE, region, ECS_* names
-export CODEX_ENV=dev
+bin/codex-selfhosted init           # creates ~/.config/codex-selfhosted/default.env (prints what to edit)
+# edit that file: AWS_PROFILE + AWS_REGION, and ECS_CLUSTER/ECS_SERVICE/ASG_NAME/LOG_GROUP (`terraform output`)
 
-source bin/aws-mfa.sh 123456        # 6-digit MFA code -> /tmp/mfa-env-dev.sh (AWS_* only)
-bin/codex-selfhosted up             # warm the GPU + open the shared SSM tunnel (~10 min cold)
+source bin/aws-mfa.sh 123456        # SOURCE it: 6-digit MFA code -> /tmp/mfa-env-default.sh (AWS_* only)
+bin/codex-selfhosted up             # warm the GPU + open the shared SSM tunnel (~10–12 min cold)
 bin/codex-selfhosted chat           # interactive, streaming — open this in as many terminals as you like
 bin/codex-selfhosted down           # scale to $0 when done
 ```
+
+> Single account? Use the default env as above — **no `CODEX_ENV` needed**. For multiple accounts, give
+> each its own env name (`CODEX_ENV=prod bin/codex-selfhosted init`, …) — see [Multi-account](#multi-account).
 
 `chat` = the interactive Codex TUI (streams live). `exec "task"` = one-shot automation. `status` = state.
 Concurrency is handled by vLLM (continuous batching) over **one shared tunnel** — every terminal shares it;

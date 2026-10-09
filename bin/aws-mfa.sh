@@ -11,12 +11,25 @@
 # Side effect: writes /tmp/mfa-env-${CODEX_ENV}.sh (chmod 600) with only AWS_* creds — the
 # codex-selfhosted client re-sources it. No app secrets are fetched or stored.
 
+# Best SOURCED (so creds land in your shell too); executing still writes /tmp/mfa-env-*.sh, which the
+# codex-selfhosted client re-sources — but you lose the creds in THIS shell.
+(return 0 2>/dev/null) || echo "tip: 'source bin/aws-mfa.sh <code>' so creds also export into this shell." >&2
+
 CODEX_ENV="${CODEX_ENV:-default}"
 _CFG="${CODEX_SELFHOSTED_CONFIG:-$HOME/.config/codex-selfhosted/$CODEX_ENV.env}"
 [ -f "$_CFG" ] && . "$_CFG"
 
-: "${AWS_PROFILE:?set AWS_PROFILE (in $_CFG)}"
-: "${AWS_REGION:?set AWS_REGION (in $_CFG)}"
+# Friendly preflight: on a fresh clone (no config) guide to `init` instead of a cryptic bash error.
+if [ -z "${AWS_PROFILE:-}" ] || [ -z "${AWS_REGION:-}" ]; then
+  echo "Error: AWS_PROFILE and AWS_REGION are required." >&2
+  if [ -f "$_CFG" ]; then
+    echo "  set them in $_CFG (or export them)." >&2
+  else
+    echo "  no config at $_CFG — run:  bin/codex-selfhosted init   (creates it), set AWS_PROFILE/AWS_REGION, then re-run." >&2
+    echo "  (multi-account: CODEX_ENV=<name> selects ~/.config/codex-selfhosted/<name>.env)" >&2
+  fi
+  return 1 2>/dev/null || exit 1
+fi
 
 if [[ -n "${1:-}" ]]; then TOKEN="$1"; else echo -n "Enter 6-digit MFA code: "; read -r TOKEN; fi
 if [[ ! "$TOKEN" =~ ^[0-9]{6}$ ]]; then echo "Error: MFA code must be exactly 6 digits."; return 1 2>/dev/null || exit 1; fi

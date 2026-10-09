@@ -2,6 +2,7 @@
 # codex-selfhosted — drive the OpenAI Codex CLI against a self-hosted vLLM GPU service on AWS.
 # Portable + multi-account: all AWS/ECS names come from a per-account config, not hardcoded.
 #
+#   codex-selfhosted init           FIRST RUN: create the per-account config, then edit it (AWS + ECS names)
 #   codex-selfhosted up             warm the GPU (min=1), open the SSM tunnel, start the idle-auto-down reaper
 #   codex-selfhosted chat ["task"]  INTERACTIVE streaming session (bare `codex` TUI) — run from many terminals
 #   codex-selfhosted resume [id]    resume a past `chat` (no id -> picker; --last -> most recent; --all -> any cwd)
@@ -23,14 +24,40 @@ set -uo pipefail
 
 CODEX_ENV="${CODEX_ENV:-default}"
 CFG="${CODEX_SELFHOSTED_CONFIG:-$HOME/.config/codex-selfhosted/$CODEX_ENV.env}"
+EXAMPLE_CFG="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/config.example.env"
 die() { echo "ERROR: $*" >&2; exit 1; }
-[ -f "$CFG" ] && . "$CFG" || echo "note: no config at $CFG (using env vars)" >&2
 
-: "${AWS_REGION:?set AWS_REGION (in $CFG)}"
-: "${ECS_CLUSTER:?set ECS_CLUSTER (in $CFG)}"
-: "${ECS_SERVICE:?set ECS_SERVICE (in $CFG)}"
-: "${ASG_NAME:?set ASG_NAME (in $CFG)}"
-: "${LOG_GROUP:?set LOG_GROUP (in $CFG)}"
+# `init` scaffolds the per-account config; it runs BEFORE the preflight (it creates what the
+# preflight needs). Idempotent — never clobbers an existing env file.
+cmd_init() {
+  mkdir -p "$(dirname "$CFG")"
+  if [ -f "$CFG" ]; then
+    echo "config already exists (not overwriting): $CFG"
+  else
+    [ -f "$EXAMPLE_CFG" ] || die "example config not found: $EXAMPLE_CFG"
+    cp "$EXAMPLE_CFG" "$CFG" && chmod 600 "$CFG" && echo "created $CFG"
+  fi
+  echo "Next: edit $CFG — set AWS_PROFILE + AWS_REGION, and ECS_CLUSTER/ECS_SERVICE/ASG_NAME/LOG_GROUP"
+  echo "      (from 'terraform output', or your existing deployment). Then:"
+  echo "      source bin/aws-mfa.sh <mfa-code>  &&  bin/codex-selfhosted up"
+}
+[ "${1:-}" = "init" ] && { cmd_init; exit $?; }
+
+[ -f "$CFG" ] && . "$CFG" || true
+
+# Friendly preflight: on a fresh clone (no config) guide to `init` instead of a cryptic bash error.
+_miss=""
+for _v in AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP; do [ -n "${!_v:-}" ] || _miss="$_miss $_v"; done
+if [ -n "$_miss" ]; then
+  echo "ERROR: missing config:${_miss}" >&2
+  if [ -f "$CFG" ]; then
+    echo "  fill these in $CFG (or export them), then re-run." >&2
+  else
+    echo "  no config at $CFG — run:  $(basename "$0") init   (creates it from config.example.env), edit it, then re-run." >&2
+    echo "  (multi-account: CODEX_ENV=<name> selects ~/.config/codex-selfhosted/<name>.env)" >&2
+  fi
+  exit 1
+fi
 REGION="$AWS_REGION"; CLUSTER="$ECS_CLUSTER"; SVC="$ECS_SERVICE"; ASG="$ASG_NAME"; LG="$LOG_GROUP"
 PORT="${CODEX_PORT:-8000}"
 SCALABLE="service/$CLUSTER/$SVC"
