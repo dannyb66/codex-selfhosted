@@ -19,6 +19,7 @@
 #   Required: AWS_PROFILE AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP
 #   Optional: CODEX_PORT(8000) CODEX_MCP_SET(github,context7,...) AWS_ACCOUNT_ID
 #             CODEX_IDLE_REAPER(1=auto-down when idle) CODEX_IDLE_TTL_MIN(30 min idle before auto-down)
+#             CODEX_UP_TIMEOUT_MIN(30: minutes `up` waits for a cold start before giving up; raise if g6e capacity is tight)
 # MFA: run `aws-mfa.sh <code>` first (writes /tmp/mfa-env-${CODEX_ENV}.sh). See README.
 set -uo pipefail
 
@@ -155,6 +156,18 @@ PY
   echo "$home"
 }
 
+# Echo a one-line capacity warning if the GPU ASG's most recent scaling activity failed for lack of
+# instance capacity — so a slow cold start that is really a capacity stall doesn't read as "normal".
+_capacity_note() {
+  local sc msg
+  read -r sc msg < <(aws autoscaling describe-scaling-activities --auto-scaling-group-name "$ASG" \
+    --region "$REGION" --max-items 1 --query 'Activities[0].[StatusCode,StatusMessage]' --output text 2>/dev/null)
+  [ "${sc:-}" = "Failed" ] || return 0
+  case "$msg" in
+    *[Ii]nsufficient*|*[Cc]apacity*) echo "⚠ GPU capacity: AWS has insufficient instance capacity in the ASG's AZ(s) — it keeps retrying. A us-east-2c subnet would add another capacity pool." ;;
+  esac
+}
+
 ensure_serving() {
   tunnel_up && return 0
   echo "[up] warm GPU (min=1)..."
@@ -167,17 +180,25 @@ ensure_serving() {
   local running
   running=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].runningCount' --output text 2>/dev/null)
   if [[ "${running:-0}" =~ ^[1-9][0-9]*$ ]]; then echo "[up] task already running — skipping cold-start wait."; return 0; fi
-  echo "[up] waiting for the model to serve (cold start ~10 min)..."
-  local i start t0 el rc
+  local tmo; tmo=$(( ${CODEX_UP_TIMEOUT_MIN:-30} * 60 ))   # overridable; g6e capacity retries can eat 10-15 min on their own
+  echo "[up] waiting for the model to serve (cold start ~12 min; timeout ${CODEX_UP_TIMEOUT_MIN:-30}m — raise CODEX_UP_TIMEOUT_MIN if g6e capacity is tight)..."
+  local start t0 el rc cap last_hb=-1
   t0=$(date +%s)
-  for i in $(seq 1 60); do
+  while :; do
     start=$(( ($(date +%s) - 90) * 1000 ))
     [ "$(aws logs filter-log-events --log-group-name "$LG" --region "$REGION" --start-time "$start" --filter-pattern '?"Application startup complete" ?"Uvicorn running on http"' --query 'length(events)' --output text 2>/dev/null)" != "0" ] && { echo "[up] model serving."; return 0; }
-    [ "$i" = 60 ] && die "timed out waiting for serving (check: $0 status)"
-    if [ $((i % 3)) = 0 ]; then   # ~every 60s: heartbeat so a long cold start never looks hung
-      el=$(( $(date +%s) - t0 ))
-      rc=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].[runningCount,pendingCount]' --output text 2>/dev/null | tr '\t' '/')
-      echo "[up]   ...still warming (${el}s elapsed; task running/pending=${rc:-?}) — normal, not a hang"
+    el=$(( $(date +%s) - t0 ))
+    if [ "$el" -ge "$tmo" ]; then
+      cap=$(_capacity_note); [ -n "$cap" ] && echo "[up] $cap" >&2
+      die "timed out after $(( tmo/60 ))m. The box may still be coming up — re-run '$0 up' to attach (it skips the wait once the task is running), or check '$0 status'. Raise CODEX_UP_TIMEOUT_MIN to wait longer."
+    fi
+    if [ "$(( el/60 ))" != "$last_hb" ]; then last_hb=$(( el/60 ))   # ~once a minute
+      cap=$(_capacity_note)
+      if [ -n "$cap" ]; then echo "[up]   ...${el}s: $cap"
+      else
+        rc=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" --region "$REGION" --query 'services[0].[runningCount,pendingCount]' --output text 2>/dev/null | tr '\t' '/')
+        echo "[up]   ...still warming (${el}s elapsed; task running/pending=${rc:-?}) — normal, not a hang"
+      fi
     fi
     sleep 20
   done
