@@ -11,9 +11,15 @@ Three layers:
 
 The GPU **scales to zero** when idle; you `up` it for a coding session (~10–12 min cold start) and `down` it after.
 
-**Documentation:** this README is command/usage-focused. For the system architecture, the design
-decisions behind it (ADRs), the operations runbook, and measured performance numbers, see
-[`docs/OVERVIEW.md`](docs/OVERVIEW.md) and the rest of [`docs/`](docs/).
+**Documentation:** this README is command/usage-focused. The full set lives in [`docs/`](docs/):
+[`OVERVIEW.md`](docs/OVERVIEW.md) (engineering overview + results),
+[`architecture.md`](docs/architecture.md) (systems view),
+[`design-decisions/`](docs/design-decisions) (ADRs with the tradeoff analysis),
+[`models.md`](docs/models.md) (registry, sizing, Codex compatibility),
+[`performance.md`](docs/performance.md) (benchmarks + methodology),
+[`operations.md`](docs/operations.md) (runbook, auto-down tuning, cost model),
+[`security.md`](docs/security.md), and
+[`case-study.md`](docs/case-study.md) (first-person case study).
 
 ## Contents
 
@@ -176,6 +182,7 @@ Client config lives at `~/.config/codex-selfhosted/${CODEX_ENV}.env` (created by
 | `instruct-14b` | Qwen2.5-14B-Instruct-AWQ | g5.xlarge (A10G 24GB) | 32k | yes (`hermes` parser); curated MCP only |
 | `coder-30b` | Qwen3-Coder-30B-A3B (MoE, 128 experts/8 active), AWQ 16.85 GiB | g5.2xlarge (A10G 24GB) ~16–32k/1–2 sess; g6e.xlarge (L40S 48GB) full MCP + more concurrency | 65k | yes (`qwen3_coder`); proven on g5.2xlarge |
 | `qwen38-stream` | Qwen3.8-27B-FP8 + MTP speculative | g6e.xlarge (L40S 48GB, Ada sm_89) | 65k | yes (`qwen3_coder` + `qwen3` reasoning); ~60 tok/s, ~85% draft acceptance — deployed + validated on awsdev 2026-09; needs [weight streaming](#weight-streaming) |
+| `qwen38-int4-stream` | RedHatAI Qwen3.8-27B-INT4 (W4A16 body + BF16 lm_head/MTP head) + MTP | g6e.xlarge (L40S 48GB, Ada sm_89) | 256k | yes (same parsers); **71.4 tok/s measured (~40% faster than FP8+MTP, same box 2026-10-12)** at 18.5 vs 28.9 GiB; streamed, validated |
 | `devstral-small-2`* | Devstral Small 2 24B (Mistral3) AWQ ~15GiB | g5.2xlarge (A10G 24GB **+ 32GB RAM**; g5.xlarge's 16GB OOMs) | — | **no** — drive with OpenHands / mini-SWE-agent / Mistral `vibe` (see below) |
 
 \* no longer a row in `models.json` — it runs on awsdev via a taskdef entry-point override
@@ -184,9 +191,10 @@ Client config lives at `~/.config/codex-selfhosted/${CODEX_ENV}.env` (created by
 Per-model detail (VRAM math, quant, KV dtype, deploy notes) lives in the `_note` fields of
 [`server/models.json`](server/models.json).
 
-> **Qwen3.8-27B is now deployed** (`qwen38-stream`) — the gated-DeltaNet hybrid successor to Qwen3.6-27B.
-> Its ~20GB FP8 weights + DeltaNet/MTP kernels need **Ada+ (sm_89)**, so it runs on **g6e.xlarge (L40S 48GB)**,
-> not the g5/A10G box; it loads by **streaming from S3** instead of a HF download (see [Weight streaming](#weight-streaming)).
+> **Qwen3.8-27B is deployed** in two variants: `qwen38-stream` (FP8, 65k ctx) and
+> `qwen38-int4-stream` (W4A16, 256k ctx, ~40% faster decode). The gated-DeltaNet hybrid needs
+> **Ada+ (sm_89)**, so both run on **g6e.xlarge (L40S 48GB)**, not the g5/A10G box, and load by
+> **streaming from S3** instead of a HF download (see [Weight streaming](#weight-streaming)).
 > Watch the qwen3-parser bug #58147 on vLLM upgrades.
 
 Switch via the `model_key` Terraform var (redeploys the taskdef) — no code change. `kv_cache_dtype=fp8`
