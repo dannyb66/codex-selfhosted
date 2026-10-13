@@ -40,6 +40,22 @@
       "speculative_config": "{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":3,\"enforce_eager\":true}",
       "instance": "g6e.xlarge",
       "gpu_min": 1
+    },
+    "qwen38-int4-stream": {
+      "_note": "Qwen3.8-27B INT4 (W4A16) + MTP, STREAMED from S3 via Run:ai Model Streamer. The INT4 body is 4-bit while the lm_head + MTP draft head are kept at higher precision (BF16) so speculative decoding still aligns (RedHatAI/Qwen3.8-27B-INT4). ~40% faster decode than FP8 (71 tok/s wall mean vs 51, same-run/same-method) at ~18.5 GiB (vs 28.9) for a ~1.5-2.5% published quality cost. VALIDATED LIVE 2026-10-12 via taskdef :21 entryPoint override: streams from S3 (100%, 38.6s load), serves with MTP + CUDA graphs, 71 tok/s / ~71% draft acceptance. Needs g6e.xlarge/L40S + task memory 28672 MiB + RUNAI_STREAMER_MEMORY_LIMIT; host the INT4 snapshot at model_uri and grant the task role s3:GetObject. NOTE: speculative method is 'mtp' (RedHat's INT4 checkpoint), NOT 'qwen3_5_mtp'. Not yet run end-to-end through entrypoint-gpu.sh (the live validation used a taskdef override).",
+      "hf_model": "RedHatAI/Qwen3.8-27B-INT4",
+      "model_uri": "s3://${MODEL_S3_BUCKET}/qwen38-27b-int4",
+      "load_format": "runai_streamer",
+      "served_name": "qwen3.8-27b",
+      "tool_parser": "qwen3_coder",
+      "reasoning_parser": "qwen3",
+      "max_model_len": 65536,
+      "quant": "none",
+      "trust_remote_code": true,
+      "gpu_memory_utilization": 0.85,
+      "speculative_config": "{\"method\":\"mtp\",\"num_speculative_tokens\":3}",
+      "instance": "g6e.xlarge",
+      "gpu_min": 1
     }
   }
 }
