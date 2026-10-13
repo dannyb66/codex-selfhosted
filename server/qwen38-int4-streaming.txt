@@ -20,7 +20,7 @@ python3 -m vllm.entrypoints.openai.api_server \
   --model s3://dev-trekhealth-llm-models/qwen38-27b-int4 \
   --load-format runai_streamer \
   --served-model-name qwen3.8-27b \
-  --max-model-len 65536 --max-num-seqs 16 --gpu-memory-utilization 0.85 --enable-prefix-caching \
+  --max-model-len 131072 --max-num-seqs 16 --gpu-memory-utilization 0.85 --enable-prefix-caching \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --trust-remote-code \
   --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
   --host 0.0.0.0 --port 8000
