@@ -64,23 +64,36 @@ that separates a platform from a one-off script.
 
 ## Role fit
 
+Keyword and framing validated against 8 live staff/principal postings (Anthropic ×3, Databricks
+×2, Together AI ×2, CoreWeave ×1, Oct 2026) — the terms below are the ones those postings actually
+use, mapped to what this project demonstrates.
+
 This work maps directly to **staff/principal AI infrastructure, ML platform, and inference
 optimization** roles:
 
-- **LLM inference engineering**: serving (vLLM), continuous batching, speculative decoding (MTP),
-  quantization (FP8, W4A16/INT4, AWQ), KV-cache memory management, tool-calling/function-calling
-  and agentic tool-use, reasoning models, MCP, open-weights models.
+- **LLM inference engineering**: LLM serving (vLLM), continuous batching, speculative decoding
+  (MTP), quantization (FP8, W4A16/INT4, AWQ), KV-cache memory management, decode throughput /
+  latency (TTFT / TPOT), tool-calling/function-calling and agentic tool-use, reasoning models, MCP,
+  open-weights models.
 - **GPU infrastructure & capacity**: GPU instance selection and right-sizing (A10G vs L40S),
-  scale-to-zero capacity design, spot/on-demand economics, cold-start optimization, deployment
-  reliability on constrained capacity (the single-GPU deadlock).
-- **Cloud & FinOps**: AWS (ECS/EC2 patterns, SSM, ECR, S3 gateway endpoints, CloudWatch), Infrastructure as Code (Terraform), cost-per-token analysis, spot savings,
-  egress-elimination, least-privilege IAM and secrets handling.
+  autoscaling and scale-to-zero capacity design, spot/on-demand economics, cold-start optimization,
+  deployment reliability on constrained capacity (the single-GPU deadlock).
+- **Cloud & FinOps**: AWS (ECS/EC2, SSM, ECR, S3 gateway endpoints, CloudWatch), Infrastructure as
+  Code (Terraform), cost-per-token analysis, egress elimination, least-privilege IAM, and secrets
+  handling. The orchestration patterns here (capacity providers, autoscaling targets, per-task
+  isolation) are the same ones Kubernetes expresses as Karpenter / HPA — the stack is Terraform-
+  portable to GCP/Azure even though this deployment is validated on AWS.
+- **Reliability & operations** — the most common staff-level signal in the postings: SLO-driven
+  operation, high-availability reasoning, observability-first design (Prometheus `/metrics`,
+  CloudWatch, per-process logs), two independent self-down paths as defense-in-depth, and an
+  on-call-able runbook. The system is built to be operated and paged, not just demoed.
 - **Staff-level signals**: 0→1 end-to-end ownership across client, serving, infra, and cost;
-   ADR-style decision records with measured outcomes; benchmark methodology discipline (measured vs
-   estimated vs external, labeled); failure diagnosis from first principles; and a system
-   designed for handoff — every layer readable in one sitting, every decision recorded as made.
+  ADR-style decision records with measured outcomes; benchmark methodology discipline (measured vs
+  estimated vs external, labeled); root-cause failure diagnosis from first principles; and a system
+  designed for handoff — every layer readable in one sitting, every decision recorded as made.
 
-Honest scope boundaries, stated up front: this is an inference platform — no training,
-fine-tuning, or RAG; it uses ECS (not Kubernetes); and the single-GPU concurrency benchmark
-(aggregate multi-session throughput) is identified as pending in
-[performance.md](performance.md) rather than asserted.
+Honest scope boundaries, stated up front: this is an **inference** platform — no model training,
+fine-tuning, or RAG; it is validated on **AWS ECS** (the Kubernetes-equivalent
+orchestration/autoscaling concepts transfer directly, but I did not build it on K8s); and the
+single-GPU aggregate throughput benchmark (multi-session continuous batching) is identified as
+pending in [performance.md](performance.md) rather than asserted.
