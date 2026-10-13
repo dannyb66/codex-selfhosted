@@ -1,0 +1,35 @@
+# Qwen3.8-27B INT4 (W4A16) + MTP via S3 streaming — the ~40%-faster production config
+# (RedHatAI/Qwen3.8-27B-INT4; validated live on awsdev 2026-10-12 via taskdef :21)
+#
+# WHY: INT4 halves the bytes read per decoded token vs FP8, so decode is ~40% faster on the same
+# L40S, and it frees ~10 GiB VRAM. The catch that made this possible: naive AWQ-4bit DROPS the MTP
+# head (4-bit is too imprecise for the drafter), but RedHatAI/Qwen3.8-27B-INT4 keeps the lm_head +
+# MTP draft head at BF16 while the body is W4A16 — so speculative decoding still aligns. Streaming
+# the checkpoint from in-region S3 (Run:ai Model Streamer) keeps the cold-start load fast + NAT-free.
+#
+# ── MEASURED (g6e.xlarge/L40S, single-stream coding prompts, 2026-10-12) ──
+#   Decode (wall):        71.4 tok/s mean (65-79)   vs FP8+MTP 50.7 (46-54)  -> ~40% faster (same run/method)
+#   Decode (server-side): ~75 tok/s peak            vs FP8 ~59
+#   MTP draft acceptance: ~71% (59-81%), accept len 2.77-3.42 / 4
+#   Footprint:            18.5 GiB                   vs FP8 28.9 GiB  (-10 GiB -> more KV / concurrency)
+#   Streamed load:        38.6 s (2031 tensors, S3->GPU, no HF/NAT)   vs INT4-HF-download 135 s
+#   Quality:              outputs correct (4-prompt smoke); published FP8->INT4 delta ~1.5-2.5% (<3%)
+#
+# ── SERVE COMMAND (taskdef :21 entryPoint override; image devci-llm-inference:gpu-stream) ──
+python3 -m vllm.entrypoints.openai.api_server \
+  --model s3://dev-trekhealth-llm-models/qwen38-27b-int4 \
+  --load-format runai_streamer \
+  --served-model-name qwen3.8-27b \
+  --max-model-len 65536 --max-num-seqs 16 --gpu-memory-utilization 0.85 --enable-prefix-caching \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --trust-remote-code \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+  --host 0.0.0.0 --port 8000
+# env: RUNAI_STREAMER_MEMORY_LIMIT=17179869184 (16 GiB CPU read buffer)
+#
+# ── GOTCHAS ──
+# - Speculative method is "mtp" (RedHat's INT4 checkpoint), NOT "qwen3_5_mtp" (which the FP8 checkpoint uses).
+# - The W4A16 body loads via the Marlin INT4 kernel (Ada sm_89 supported on the L40S).
+# - vLLM auto-detects the compressed-tensors quant — pass NO --quantization (quant="none" in the registry).
+# - No top-level --enforce-eager: the main model keeps CUDA graphs; only the MTP draft head is eager.
+# - S3 object set is ~19.5 GB (INT4 body + BF16 lm_head + MTP head + tokenizer).
+# - Rollbacks: FP8-stream :19, INT4-HF-download :20; LT v7 (100 GB root). Deploy: service taskdef :21.
