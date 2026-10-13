@@ -11,6 +11,10 @@ Three layers:
 
 The GPU **scales to zero** when idle; you `up` it for a coding session (~10–12 min cold start) and `down` it after.
 
+**Documentation:** this README is command/usage-focused. For the system architecture, the design
+decisions behind it (ADRs), the operations runbook, and measured performance numbers, see
+[`docs/OVERVIEW.md`](docs/OVERVIEW.md) and the rest of [`docs/`](docs/).
+
 ## Contents
 
 - [How it works](#how-it-works)
