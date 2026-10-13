@@ -81,6 +81,7 @@ USER_CODEX_CONFIG="$HOME/.codex/config.toml"
 CODEX_HOME_DIR="${CODEX_HOME_PERSIST:-$HOME/.config/codex-selfhosted/codexhome-$CODEX_ENV}"
 CODEX_MCP_SET="${CODEX_MCP_SET:-github,context7}"
 CODEX_EFFORT="${CODEX_REASONING_EFFORT:-xhigh}"   # default reasoning effort. Qwen3.8 (qwen3 parser) accepts xhigh|medium|low (NOT high); coder-30b has no reasoning parser so it ignores this.
+CODEX_MODEL_CONTEXT_WINDOW="${CODEX_MODEL_CONTEXT_WINDOW:-}"   # override Codex's context window (tokens). Empty = auto-derive from the live endpoint's /v1/models max_model_len (floor 65536). Codex must be told the real window or it assumes a 272K fallback for the unknown slug and never compacts before vLLM 400s.
 # Codex<->vLLM-0.30.0 compatibility proxy: Codex sends a 'developer' role + typed 'input_text'
 # content chunks that vLLM 0.30.0 rejects (400) for ANY model. codex-role-proxy.py sits in front of
 # the tunnel and rewrites them; Codex points at the proxy. Set CODEX_PROXY=0 to bypass it.
@@ -115,17 +116,26 @@ resolve_targets() {  # -> "IP EC2" or non-zero
 
 tunnel_up()   { curl -sf --max-time 4 "$BASE/health" >/dev/null 2>&1; }   # --max-time: fast-fail if a stale tunnel half-opens the port
 served_model(){ curl -sf --max-time 6 "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; print((json.load(sys.stdin).get('data') or [{}])[0].get('id',''))" 2>/dev/null; }
+# The served model's max_model_len is the authoritative context window — feed it to Codex (top-level model_context_window)
+# so it compacts locally before the prompt hits vLLM's hard cap. Empty (missing field / unreachable) -> caller's floor.
+served_window(){ curl -sf --max-time 6 "$BASE/v1/models" 2>/dev/null | python3 -c "import sys,json; d=(json.load(sys.stdin).get('data') or [{}])[0]; w=d.get('max_model_len'); print(w if isinstance(w,int) and w>0 else '')" 2>/dev/null; }
 
 make_codex_home() {  # $1=served model; $2=optional home dir (default: fresh mktemp/ephemeral). honors CODEX_MCP_SET
-  local m="$1" home="${2:-}" cwd tmp
+  local m="$1" home="${2:-}" cwd tmp win trig
   cwd=$(pwd)
   [ -n "$home" ] || home=$(mktemp -d "${TMPDIR:-/tmp}/codex-selfhosted.XXXXXX")
   mkdir -p "$home"
+  win="$CODEX_MODEL_CONTEXT_WINDOW"       # tell Codex the REAL window so it compacts locally before vLLM's cap 400s:
+  [ -n "$win" ] || win=$(served_window)   #   empty override -> derive from the live endpoint (auto-tracks 64K/128K/256K);
+  [ -n "$win" ] || win=65536              #   endpoint unreachable / old vLLM w/o the field -> safe floor.
+  trig=$(( win * 70 / 100 ))              # compact at 70%: leaves room for the local-compaction call itself + its output.
   tmp="$home/.config.toml.$$"   # build in a temp then atomic mv, so a concurrent chat sharing this
   {                             # persistent home never reads a half-written (e.g. MCP-less) config.toml
     printf 'model = "%s"\n' "$m"
     printf 'model_provider = "selfhosted"\n'
     printf 'model_reasoning_effort = "%s"\n' "$CODEX_EFFORT"
+    printf 'model_context_window = %s\n' "$win"              # MUST be top-level (not under [model_providers]) or Codex buries + ignores it
+    printf 'model_auto_compact_token_limit = %s\n' "$trig"   # auto local-compaction trigger; unset -> Codex's 272K-fallback default (never fires here)
     printf '[model_providers.selfhosted]\n'
     printf 'name = "Self-hosted vLLM"\n'
     printf 'base_url = "%s/v1"\n' "$CODEX_BASE"
