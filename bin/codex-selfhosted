@@ -11,11 +11,11 @@
 #   codex-selfhosted status         show GPU + tunnel + endpoint
 #   codex-selfhosted down           scale the GPU to $0 and close the shared tunnel
 #
-# Codex CLI flags pass straight through to the underlying `codex`, e.g.:  --search (web search; chat/run TUI only)
-#   -m <model>  -p <profile>  -s read-only|workspace-write|danger-full-access  -a on-request (re-enable prompts)
-#   --full-auto  --dangerously-bypass-approvals-and-sandbox (full YOLO).  DEFAULT posture for this self-hosted
-#   box is HANDS-OFF (sandbox_mode=workspace-write + approval_policy=never); pass any -s / -a / --full-auto /
-#   --dangerously-bypass-approvals-and-sandbox and the wrapper steps aside so your flag wins.
+# Codex CLI flags pass straight through to the underlying `codex`, e.g.:  --search (web search; chat/resume TUI)
+#   -m <model>  -p <profile>  -s read-only|workspace-write|danger-full-access  -a on-request (re-enable prompts)  --full-auto.
+#   DEFAULTS for this self-hosted box (yours -> hands-off): --dangerously-bypass-approvals-and-sandbox (no sandbox/approvals)
+#   + --search on chat/resume, and the served model (currently qwen3.8-27b). Dial back with CODEX_BYPASS=0 / CODEX_SEARCH=0,
+#   or pass any -s / -a / --full-auto / --dangerously-bypass-approvals-and-sandbox per-run and the wrapper steps aside.
 #
 # Concurrency: ONE shared tunnel on a fixed local port; the vLLM server handles concurrency
 # (continuous batching). `chat`/`resume` share a persistent CODEX_HOME per env (so session rollouts
@@ -24,6 +24,7 @@
 # Config: sourced from $CODEX_SELFHOSTED_CONFIG or ~/.config/codex-selfhosted/${CODEX_ENV:-default}.env
 #   Required: AWS_PROFILE AWS_REGION ECS_CLUSTER ECS_SERVICE ASG_NAME LOG_GROUP
 #   Optional: CODEX_PORT(8000) CODEX_MCP_SET(github,context7,...) AWS_ACCOUNT_ID
+#             CODEX_BYPASS(1=default --dangerously-bypass-approvals-and-sandbox; 0=sandboxed) CODEX_SEARCH(1=default --search on TUI; 0=off)
 #             CODEX_IDLE_REAPER(1=auto-down when idle) CODEX_IDLE_TTL_MIN(30 min idle before auto-down)
 #             CODEX_UP_TIMEOUT_MIN(30: minutes `up` waits for a cold start before giving up; raise if g6e capacity is tight)
 # MFA: run `aws-mfa.sh <code>` first (writes /tmp/mfa-env-${CODEX_ENV}.sh). See README.
@@ -88,6 +89,14 @@ CODEX_HOME_DIR="${CODEX_HOME_PERSIST:-$HOME/.config/codex-selfhosted/codexhome-$
 CODEX_MCP_SET="${CODEX_MCP_SET:-github,context7}"
 CODEX_EFFORT="${CODEX_REASONING_EFFORT:-xhigh}"   # default reasoning effort. Qwen3.8 (qwen3 parser) accepts xhigh|medium|low (NOT high); coder-30b has no reasoning parser so it ignores this.
 CODEX_MODEL_CONTEXT_WINDOW="${CODEX_MODEL_CONTEXT_WINDOW:-}"   # override Codex's context window (tokens). Empty = auto-derive from the live endpoint's /v1/models max_model_len (floor 65536). Codex must be told the real window or it assumes a 272K fallback for the unknown slug and never compacts before vLLM 400s.
+# Default posture + web search for this self-hosted box (it's yours -> hands-off by default). A posture FLAG you pass
+# per-run (-s/--sandbox/-a/--ask-for-approval/--full-auto/--dangerously-*) overrides CODEX_BYPASS for that run.
+CODEX_BYPASS="${CODEX_BYPASS:-1}"     # 1 (default) -> inject --dangerously-bypass-approvals-and-sandbox (no sandbox, no approvals) when you pass no posture flag.
+                                      # 0 -> sandboxed hands-off instead (-c sandbox_mode=workspace-write -c approval_policy=never).
+CODEX_SEARCH="${CODEX_SEARCH:-1}"     # 1 (default) -> add --search (Codex web search) on chat/resume (TUI; exec has no --search). 0 -> off.
+                                      # NOTE: web_search is a server-side Responses tool; vLLM accepts it (verified HTTP 200, no 400) but likely won't actually search (no backend) -> harmless no-op; set 0 to drop it.
+if [ "$CODEX_BYPASS" = "1" ]; then POSTURE_DEFAULT=(--dangerously-bypass-approvals-and-sandbox)
+else POSTURE_DEFAULT=(-c sandbox_mode=workspace-write -c approval_policy=never); fi
 # Codex<->vLLM-0.30.0 compatibility proxy: Codex sends a 'developer' role + typed 'input_text'
 # content chunks that vLLM 0.30.0 rejects (400) for ANY model. codex-role-proxy.py sits in front of
 # the tunnel and rewrites them; Codex points at the proxy. Set CODEX_PROXY=0 to bypass it.
@@ -297,16 +306,19 @@ _user_sets_posture() {
   esac; done
   return 1
 }
+# True if flag $1 already appears in the remaining args — avoids injecting a duplicate --search.
+_has_arg() { local want="$1"; shift; local a; for a in "$@"; do [ "$a" = "$want" ] && return 0; done; return 1; }
 
 cmd_chat() {
   tunnel_up || die "tunnel not up — run: $0 up"
   start_proxy   # idempotent: Codex points at the proxy, so make sure it's running
   local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
   home=$(make_codex_home "$m" "$CODEX_HOME_DIR")   # persistent home: session rollouts survive here for `resume`
-  local posture=(); _user_sets_posture "$@" || posture=(-c sandbox_mode=workspace-write -c approval_policy=never)
-  echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  (/quit to exit; resume later with: $0 resume)"
-  # model + provider already come from the generated config.toml; "$@" (your flags + prompt) overrides the defaults
-  CODEX_HOME="$home" codex ${posture[@]+"${posture[@]}"} "$@"
+  local posture=(); _user_sets_posture "$@" || posture=("${POSTURE_DEFAULT[@]}")
+  local search=(); { [ "$CODEX_SEARCH" = "1" ] && ! _has_arg --search "$@"; } && search=(--search)
+  echo "[chat] model=$m  MCP=[$CODEX_MCP_SET]  bypass=$CODEX_BYPASS search=$CODEX_SEARCH  (/quit to exit; resume later with: $0 resume)"
+  # model + provider come from the generated config.toml; "$@" (your flags + prompt) overrides these defaults
+  CODEX_HOME="$home" codex ${search[@]+"${search[@]}"} ${posture[@]+"${posture[@]}"} "$@"
 }
 
 cmd_resume() {   # resume a saved chat session: resume [SESSION_ID | --last | --all] [prompt]
@@ -314,9 +326,10 @@ cmd_resume() {   # resume a saved chat session: resume [SESSION_ID | --last | --
   start_proxy
   local m; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
   make_codex_home "$m" "$CODEX_HOME_DIR" >/dev/null   # refresh provider/model in the persistent home
-  local posture=(); _user_sets_posture "$@" || posture=(-c sandbox_mode=workspace-write -c approval_policy=never)
+  local posture=(); _user_sets_posture "$@" || posture=("${POSTURE_DEFAULT[@]}")
+  local search=(); { [ "$CODEX_SEARCH" = "1" ] && ! _has_arg --search "$@"; } && search=(--search)
   echo "[resume] model=$m  home=$CODEX_HOME_DIR  args=[${*:-<picker>}]  (sessions are cwd-filtered; add --all for other dirs)"
-  CODEX_HOME="$CODEX_HOME_DIR" codex resume ${posture[@]+"${posture[@]}"} "$@"
+  CODEX_HOME="$CODEX_HOME_DIR" codex resume ${search[@]+"${search[@]}"} ${posture[@]+"${posture[@]}"} "$@"
 }
 
 cmd_exec() {
@@ -325,7 +338,7 @@ cmd_exec() {
   start_proxy
   local m home; m=$(served_model); [ -n "$m" ] || die "endpoint not serving"
   home=$(CODEX_MCP_SET="${CODEX_MCP_SET_EXEC:-}" make_codex_home "$m"); trap "rm -rf '$home'" EXIT   # bake path in (see cmd_chat)
-  local posture=(); _user_sets_posture "$@" || posture=(-c sandbox_mode=workspace-write -c approval_policy=never)
+  local posture=(); _user_sets_posture "$@" || posture=("${POSTURE_DEFAULT[@]}")
   echo "[exec] model=$m"
   # model + provider come from the generated config.toml; "$@" (your flags + task) overrides the defaults
   CODEX_HOME="$home" codex exec --skip-git-repo-check ${posture[@]+"${posture[@]}"} "$@"
