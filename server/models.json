@@ -42,15 +42,16 @@
       "gpu_min": 1
     },
     "qwen38-int4-stream": {
-      "_note": "Qwen3.8-27B INT4 (W4A16) + MTP, STREAMED from S3 via Run:ai Model Streamer. The INT4 body is 4-bit while the lm_head + MTP draft head are kept at higher precision (BF16) so speculative decoding still aligns (RedHatAI/Qwen3.8-27B-INT4). ~40% faster decode than FP8 (71 tok/s wall mean vs 51, same-run/same-method) at ~18.5 GiB (vs 28.9) for a ~1.5-2.5% published quality cost. VALIDATED LIVE 2026-10-12 via taskdef :21 entryPoint override: streams from S3 (100%, 38.6s load), serves with MTP + CUDA graphs, 71 tok/s / ~71% draft acceptance. Needs g6e.xlarge/L40S + task memory 28672 MiB + RUNAI_STREAMER_MEMORY_LIMIT; host the INT4 snapshot at model_uri and grant the task role s3:GetObject. NOTE: speculative method is 'mtp' (RedHat's INT4 checkpoint), NOT 'qwen3_5_mtp'. Not yet run end-to-end through entrypoint-gpu.sh (the live validation used a taskdef override). max_model_len is 131072 (128K): INT4 frees ~10 GiB vs FP8 so the hybrid KV holds a 128K window — the prior 65536 (64K) was too small for Codex's ~65K agentic prompt (harness + MCP tool schemas).",
+      "_note": "Qwen3.8-27B INT4 (W4A16) + MTP, STREAMED from S3 via Run:ai Model Streamer. The INT4 body is 4-bit while the lm_head + MTP draft head are kept at higher precision (BF16) so speculative decoding still aligns (RedHatAI/Qwen3.8-27B-INT4). ~40% faster decode than FP8 (71 tok/s wall mean vs 51, same-run/same-method) at ~18.5 GiB (vs 28.9) for a ~1.5-2.5% published quality cost. VALIDATED LIVE 2026-10-12 via taskdef :21 entryPoint override: streams from S3 (100%, 38.6s load), serves with MTP + CUDA graphs, 71 tok/s / ~71% draft acceptance. Needs g6e.xlarge/L40S + task memory 28672 MiB + RUNAI_STREAMER_MEMORY_LIMIT; host the INT4 snapshot at model_uri and grant the task role s3:GetObject. NOTE: speculative method is 'mtp' (RedHat's INT4 checkpoint), NOT 'qwen3_5_mtp'. Not yet run end-to-end through entrypoint-gpu.sh (the live validation used a taskdef override). max_model_len is 262144 (256K) with kv_cache_dtype fp8 (validated live 2026-10-13, taskdef :23): the gated-DeltaNet hybrid's KV is cheap (only 16/64 layers hold attention KV), so 256K fits in ~8 GiB of fp8 KV next to the 18.5 GiB INT4 weights on the L40S. The earlier 64K/128K windows were too small for long Codex sessions (harness + MCP schemas + accumulated history fill tens of K).",
       "hf_model": "RedHatAI/Qwen3.8-27B-INT4",
       "model_uri": "s3://${MODEL_S3_BUCKET}/qwen38-27b-int4",
       "load_format": "runai_streamer",
       "served_name": "qwen3.8-27b",
       "tool_parser": "qwen3_coder",
       "reasoning_parser": "qwen3",
-      "max_model_len": 131072,
+      "max_model_len": 262144,
       "quant": "none",
+      "kv_cache_dtype": "fp8",
       "trust_remote_code": true,
       "gpu_memory_utilization": 0.85,
       "speculative_config": "{\"method\":\"mtp\",\"num_speculative_tokens\":3}",
