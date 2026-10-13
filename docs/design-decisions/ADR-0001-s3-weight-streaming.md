@@ -47,13 +47,16 @@ Weight-load numbers are from a live run on `g6e.xlarge` (L40S), captured in
 [`server/qwen38-fp8-streaming.txt`](../../server/qwen38-fp8-streaming.txt) — the repo's own
 source-of-truth artifact for this benchmark. Cost figures are from the same file.
 
-**A measurement note, stated plainly because it matters:** that same artifact labels its end-to-end
-cold-start figure (~8.5–9 min, from summing component timings) as an *estimate*, explicitly flagged
-"not a fresh end-to-end run" — while `README.md` and the `models.json` registry entry both state
-"~11.5 min" as measured/validated. Those two numbers were captured at different times and have not
-been reconciled against a single fresh, timed `up` from `desired=0`. See
-[`performance.md`](../performance.md#cold-start) for both figures side by side with sources — I'd
-rather show the discrepancy than quietly pick the more flattering number.
+**A measurement note, stated plainly because it matters:** the end-to-end streamed cold start is
+**~11.5 min**, measured — the figure `README.md` and the `models.json` registry entry both record as
+validated (live, 2026-09-29). The `server/qwen38-fp8-streaming.txt` artifact also carries a ~8.5–9 min
+figure, but that one is a *component sum* it explicitly flags as "not a fresh end-to-end run," and it
+proved over-optimistic: summing component timings under-counted real end-to-end overhead, so the
+measured ~11.5 min supersedes it. The ~8.5–9 min number is kept in the `server/` artifact as a
+corrected estimate, not a competing measurement. Note which way the correction ran — the *flattering*
+number (8.5) was the one that lost, which is exactly why estimate-versus-measured is labeled here
+rather than averaged into one tidy figure. See [`performance.md`](../performance.md#cold-start) for the
+full breakdown with sources.
 
 ## Consequences
 

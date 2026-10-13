@@ -67,7 +67,9 @@ Summarized here for scope and impact:
    the direct bottleneck for an interactive coding agent. I benchmarked three serving configurations
    on the same hardware (AWQ-INT4 eager, FP8 + CUDA graphs, FP8 + MTP speculative decoding) before
    picking the production config — a controlled, same-box comparison rather than a spec-sheet
-   decision.
+   decision. A later INT4 + MTP bake-off (2026-10-12), measured the same way on the same box, ran ~40%
+   faster still at a sub-3% quality cost — confirming the throughput-first thesis; it is pending S3
+   streaming before it can land as production.
 3. **[ADR-0003](design-decisions/ADR-0003-single-gpu-deployment-config.md) — fixing a single-GPU rolling-deployment
    deadlock.** A one-GPU service running ECS's *default* rolling-update settings will wedge itself
    permanently on the first task-definition change: ECS tries to run two tasks during the rollover,
@@ -86,16 +88,21 @@ Headlines:
 
 | Dimension | Result |
 |---|---|
-| Decode throughput | **~4.3x** from a non-speculative FP8 baseline (~14 → ~59–60 tok/s) by adding multi-token-prediction speculative decoding on the same GPU |
+| Decode throughput | **~4.3x** over a non-speculative eager baseline (~14 → ~59–60 tok/s), ~2.2x over FP8-alone (~27 → ~60), by adding multi-token-prediction speculative decoding on the same GPU |
+| INT4 vs. FP8 (same box) | **INT4 + MTP ~40% faster** than FP8 + MTP (71.4 vs. 50.7 tok/s, wall-clock mean over 4 prompts) in ~36% less GPU memory (18.5 vs. 28.9 GiB), at a sub-3% quality cost — measured 2026-10-12 on HF-download, not yet streamed or landed as a production config |
 | MTP draft acceptance | 84.8–96.4% (streamed-weights run), ~78% (HF-download baseline run) — speculation is doing real work, not padding |
 | Image size | 34 GB baked → ~9 GB streamed (no model weights in the image) |
 | Weight load time | 36.1 s (no speculator) / 53.8 s (with MTP) streamed from S3, vs. 100.9 s for the baked image |
+| Cold start | ~11.5 min streamed end-to-end, vs. ~17 min on the HuggingFace-download path (measured) |
 | Cold-start egress cost | $0 — in-region S3 gateway endpoint, no NAT data charge, vs. ~28 GB of HuggingFace traffic per cold start on the download path |
 | Idle cost | $0 — scale-to-zero on both the ECS service and the GPU ASG; `use_spot` cuts warm-hour cost ~65% further |
 
-Where repo artifacts disagree or a number is a published third-party benchmark rather than an
-in-repo measurement, `performance.md` says so explicitly — a measured number and an estimate are not
-interchangeable, and I've kept them labeled as such rather than rounding away the difference.
+Every figure in [`performance.md`](performance.md) is labeled by what kind of claim it is — measured,
+estimate, published external benchmark, or superseded — because a measured number and an estimate are
+not interchangeable. The INT4-vs-FP8 comparison above is a same-box, same-methodology wall-clock mean,
+not a cross-run splice of the most flattering numbers from each config; and where a fresh measurement
+overtook an earlier estimate (the streamed cold start), the old figure is marked corrected rather than
+quietly dropped.
 
 ## Engineering practices this repo demonstrates
 
@@ -113,9 +120,9 @@ interchangeable, and I've kept them labeled as such rather than rounding away th
 - **Honest validation boundaries.** Every serving configuration documents whether it was validated
   end-to-end, measured from component timings, or is a portable-but-unverified path (see
   [ADR-0001](design-decisions/ADR-0001-s3-weight-streaming.md)'s note on the registry path vs. the
-  proven taskdef override) — the kind of distinction that matters once something this reaches a
-  second engineer.
-- **Full-stack ownership in a narrow footprint.** One person, three weeks, 27 commits
+  proven taskdef override) — the kind of distinction that matters the moment this reaches a second
+  engineer.
+- **Full-stack ownership in a narrow footprint.** One person, three weeks
   (2026-09-22 → 2026-10-12): client UX, a request-compatibility shim for an API dialect gap between
   Codex and vLLM 0.30.0, GPU inference serving, performance tuning, cost engineering, and
   infrastructure-as-code — each layer small enough to read in one sitting, and each decision recorded

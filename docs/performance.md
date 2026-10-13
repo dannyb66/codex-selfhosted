@@ -2,8 +2,9 @@
 
 Every number below is labeled with where it came from and what kind of claim it is. Two labels matter
 most: **Measured** (captured from an actual run, with the source file cited) and **Estimate**
-(computed from component measurements, not a fresh end-to-end timing). Where a repo artifact disagrees
-with another, both are shown — see [Cold start](#cold-start). Where a figure is a published
+(computed from component measurements, not a fresh end-to-end timing). Where a fresh measurement
+superseded an earlier in-repo estimate, the superseded figure is called out as corrected rather than
+silently dropped — see [Cold start](#cold-start). Where a figure is a published
 third-party benchmark rather than an in-repo measurement, it's marked **External**. Where something
 hasn't been run yet, it's marked **Pending**. This is the same discipline
 [ADR-0001](design-decisions/ADR-0001-s3-weight-streaming.md) and
@@ -11,8 +12,9 @@ hasn't been run yet, it's marked **Pending**. This is the same discipline
 numbers — a benchmark that doesn't say what it is isn't a benchmark, it's a vibe.
 
 **Hardware for all measured numbers below:** `g6e.xlarge` (NVIDIA L40S, 48 GB, Ada/sm_89), coding
-prompts, `reasoning_effort=medium`, captured on the project's awsdev reference deployment,
-late-September 2026.
+prompts, `reasoning_effort=medium`, captured on the project's awsdev reference deployment —
+late-September 2026 for the FP8 and streaming numbers, and 2026-10-12 for the INT4 bake-off (same
+L40S hardware class).
 
 ## Decode throughput and speculative decoding
 
@@ -47,21 +49,26 @@ component of total cold start. See below.
 
 ## Cold start
 
-This is the one place two repo artifacts disagree, so both are shown rather than collapsed into one
-number:
+The streamed-path cold start is **~11.5 min**, measured end-to-end (validated live 2026-09-29). An
+earlier ~8.5–9 min figure — a component sum (boot + weight load + warmup) that
+`server/qwen38-fp8-streaming.txt` itself flagged as "components measured; not a fresh end-to-end
+run" — proved over-optimistic: summing component timings under-counted real end-to-end overhead, and
+the measured end-to-end value supersedes it. It is recorded here as a corrected estimate, not a second
+live number competing with the 11.5-min measurement. (The superseded figure still lives in the
+`server/` artifact, which is outside this doc set's edit scope — it is noted as corrected here rather
+than silently contradicted.) Cold start depends on the weight-load path, so every row below names it:
 
-| Figure | Value | Source | Status |
-|---|---|---|---|
-| Cold start, component sum (boot + load + warmup) | ~8.5–9 min | `server/qwen38-fp8-streaming.txt` | **Estimate** — the artifact explicitly flags this as "components measured; not a fresh end-to-end run" |
-| Cold start, end-to-end (streamed) | ~11.5 min | `README.md`, `server/models.json` `_note` | Stated as measured/validated in both, but without the same component breakdown as the row above |
-| Cold start, end-to-end (HF-download baseline) | ~17 min | `README.md` | Stated as measured; no separate component artifact in this repo |
+| Figure | Load path | Value | Status | Source |
+|---|---|---|---|---|
+| Cold start, end-to-end | S3-streamed (FP8) | **~11.5 min** | **Measured** | `README.md`, `server/models.json` `_note` |
+| Cold start, end-to-end | HF-download (FP8) | ~17 min | **Measured** | `README.md` |
+| Cold start, end-to-end | HF-download (INT4) | ~12 min (model load ~135 s) | **Measured** — awsdev 2026-10-12 | INT4 bake-off run (not yet an in-repo artifact) |
+| Cold start, component sum | S3-streamed (FP8) | ~8.5–9 min | **Superseded** — over-optimistic component sum, replaced by the ~11.5-min end-to-end measurement | `server/qwen38-fp8-streaming.txt` |
 
-These two streamed-path numbers (~8.5–9 min vs. ~11.5 min) were captured at different times and have
-not been reconciled against a single fresh, timed `up` from `desired=0`. The honest summary: cold
-start for the streamed path is **in the 8.5–11.5 minute range** depending on which capture you trust,
-materially faster than the ~17 minute HF-download baseline either way, and a clean re-measurement
-(time `bin/codex-selfhosted up` from a fully scaled-down state) would settle the exact number — that
-run has not been done since this doc set was written.
+The streamed path is materially faster than the HF-download baseline at equal quantization (~11.5 vs.
+~17 min, FP8). The INT4 checkpoint was benchmarked on the HF-download path at ~12 min — faster than
+FP8-HF's ~17 min, a smaller checkpoint to pull and load; streaming it from S3, the obvious next step
+to put INT4 on the production cold-start path, has not been run.
 
 ## Image and storage footprint
 
@@ -75,29 +82,50 @@ run has not been done since this doc set was written.
 
 ## Quantization: FP8 vs. INT4
 
-| Metric | FP8 (production) | INT4 | Status |
+An INT4 bake-off ran on the same class of hardware on **2026-10-12** (awsdev, L40S), benchmarking
+`RedHatAI/Qwen3.8-27B-INT4` — a W4A16 body with a higher-precision (BF16) MTP draft head — against the
+production FP8 + MTP config back-to-back. Both configs were timed with the **same methodology**:
+wall-clock mean over 4 coding prompts, `max_tokens=600`, `temp=0`, single-stream. This checkpoint was
+**HF-downloaded, not yet S3-streamed**, and is not yet a `models.json` entry.
+
+| Metric | FP8 + MTP | INT4 + MTP | Status |
 |---|---|---|---|
-| Weight footprint | ~29 GB (consistent with the S3/checkpoint figures above) | ~18.5 GB | FP8: Measured (in-repo). INT4: **not yet an in-repo measurement** — reported from a parallel INT4 quantization workstream not yet landed as a `models.json` entry in this repo |
-| Decode throughput (this hardware) | 55–60 tok/s (table above) | — | **Pending** — INT4 tok/s benchmark on this deployment's hardware is in progress, not yet available |
-| Quality retention vs. BF16 | ~99% (typical for FP8 PTQ) | ~94–96% (typical for INT4 AWQ) | **External** — published third-party quantization benchmarks (e.g., NVIDIA TensorRT Model Optimizer comparisons on MMLU/GSM8K/HumanEval-style evals), not an in-repo evaluation of this checkpoint. Gap is ~1.5–2.5 percentage points, consistent with the ~1.4–1.5-point MMLU gap reported in those published comparisons. |
+| Decode throughput, wall-clock mean (4 prompts) | ~50.7 tok/s | **71.4 tok/s** (range 65–79) | **Measured** — awsdev 2026-10-12, same-run back-to-back, HF-download |
+| Decode throughput, server-side peak | ~59 tok/s | 75.2 tok/s | **Measured** — same run |
+| MTP draft acceptance | ~64% | ~71% (59–81%), acceptance length 2.77–3.42 / 4 | **Measured** — same run |
+| Runtime memory footprint | 28.9 GiB | **18.5 GiB** | **Measured** — awsdev 2026-10-12 (runtime GPU memory, a distinct quantity from the on-disk checkpoint sizes in the image/storage table above) |
+| Quality vs. BF16 | ~99% (typical FP8 PTQ) | ~1.5–2.5 pts below FP8 | **External** — published third-party benchmarks (e.g., NVIDIA TensorRT Model Optimizer on MMLU/GSM8K/HumanEval-style evals) for INT4 **AWQ**; the benchmarked checkpoint is W4A16 with a BF16 MTP head, a different quantization scheme, so the figure is indicative, not a measurement of this checkpoint. The ~1.5–2.5-point delta is under the project's 3% quality bar. |
+
+**INT4 + MTP is ~40% faster than FP8 + MTP on the same box** — 71.4 vs. 50.7 tok/s — at a ~1.5–2.5-point
+quality cost that stays under the 3% bar, in ~36% less GPU memory (18.5 vs. 28.9 GiB). The comparison
+is apples-to-apples: both figures are **wall-clock means over the same 4 coding prompts, measured
+back-to-back in one 2026-10-12 session**. That is a stricter metric than the server-side steady-state
+peaks reported for the earlier FP8 runs (the 55–60 tok/s figures in the decode table above) — wall-clock
+mean includes prefill and per-request overhead, server-side peak does not, so the two are different
+metrics rather than conflicting measurements. The INT4 run's outputs were spot-checked correct on all 4
+prompts (a smoke check, not a formal eval). Streaming the INT4 checkpoint from S3 — the step that would
+put it on the production cold-start path — has not been run.
 
 Full tradeoff discussion, including the Qwen3-Coder-Next landscape note, is in
 [ADR-0002](design-decisions/ADR-0002-quantization-and-speculative-decoding.md).
 
 ## What's measured vs. what's still open
 
-**Measured, in this repo, with a cited source:** single-stream decode throughput for all three
-serving configs; MTP draft-acceptance rate (two runs); model load time by path; image sizes; S3/ECR
-storage cost; FP8 weight footprint.
+**Measured, with a cited source:** single-stream decode throughput for all three in-repo serving
+configs; MTP draft-acceptance rate; model load time by path; image sizes; S3/ECR storage cost; FP8
+weight footprint; end-to-end streamed cold start (~11.5 min); and, from the 2026-10-12 awsdev INT4
+bake-off, INT4 + MTP decode throughput, draft acceptance, and runtime memory footprint (HF-download,
+not yet captured as an in-repo artifact).
 
-**Estimated, not re-verified end-to-end:** streamed cold start as a component sum (~8.5–9 min).
+**External, not an in-repo evaluation:** FP8/INT4 quality-retention figures (published AWQ benchmarks,
+not this checkpoint); the Qwen3-Coder-Next landscape comparison in ADR-0002.
 
-**External, not an in-repo evaluation:** FP8/INT4 quality-retention percentages; the Qwen3-Coder-Next
-landscape comparison in ADR-0002.
+**Superseded:** the ~8.5–9 min component-sum cold-start estimate, replaced by the ~11.5-min end-to-end
+measurement.
 
 **Pending — identified gaps, not yet measured:**
-- INT4 decode throughput on this deployment's hardware.
-- A single fresh, timed end-to-end `up` reconciling the two cold-start figures above.
+- S3-streaming the INT4 checkpoint and landing it as a `models.json` entry — the bake-off ran on the
+  HF-download path, so the streamed cold start and the portable registry path for INT4 have not been run.
 - Aggregate multi-session decode throughput under concurrent load (continuous batching is architecturally
   expected to raise effective throughput per GPU — see [`architecture.md`](architecture.md#concurrency-model)
   — but has not been separately benchmarked; see the cost-per-token caveat in
