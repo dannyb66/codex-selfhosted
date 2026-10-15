@@ -56,22 +56,15 @@ fi
 GPU_UTIL="${GPU_UTIL_MODEL:-${GPU_MEMORY_UTILIZATION:-0.92}}"
 PORT="${VLLM_PORT:-8000}"
 
-# Layer-2 backstop: absolute max-warm self-down. If MAX_WARM_HOURS>0 (taskdef), a background timer
-# scales THIS service to 0 after that long — so a warm box downs itself even if the client that ran
-# `up` vanished without `down`. Inert unless MAX_WARM_HOURS + SELF_CLUSTER are set (safe on deploys
-# that don't opt in). Needs boto3 (Dockerfile) + task-role IAM (server/self-down-iam.json) +
-# SELF_CLUSTER/SELF_SERVICE[/SELF_ASG/SELF_SCALABLE] in the taskdef. Complements the client idle
-# reaper (Layer 1): Layer 1 downs on idle while the client lives; this is a client-independent cap.
-if [ "${MAX_WARM_HOURS:-0}" != "0" ] && [ -n "${SELF_CLUSTER:-}" ]; then
-  (
-    secs=$(python3 -c "import sys; print(int(float(sys.argv[1])*3600))" "$MAX_WARM_HOURS" 2>/dev/null || echo 0)
-    if [ "${secs:-0}" -gt 0 ] 2>/dev/null; then
-      sleep "$secs"
-      echo "[max-warm] ${MAX_WARM_HOURS}h reached — self-down $(date -u +%H:%M:%SZ)" >&2
-      python3 /app/self_down.py
-    fi
-  ) &
-  echo "[max-warm] backstop armed: self-down after ${MAX_WARM_HOURS}h"
+# Layer-2 backstop: idle + absolute-cap self-down from inside the container. self_down.py watches vLLM
+# /metrics and scales THIS service to 0 after IDLE_MINUTES of no activity OR MAX_WARM_HOURS (whichever
+# first) — so a warm box downs itself even if the client that ran `up` vanished without `down`. Inert
+# unless SELF_CLUSTER + (IDLE_MINUTES or MAX_WARM_HOURS) are set (safe on deploys that don't opt in).
+# Needs boto3 (Dockerfile) + task-role IAM (server/self-down-iam.json) + SELF_CLUSTER/SELF_SERVICE
+# [/SELF_ASG/SELF_SCALABLE]. Complements the client idle reaper (Layer 1) but is client-independent.
+if [ -n "${SELF_CLUSTER:-}" ] && { [ "${MAX_WARM_HOURS:-0}" != "0" ] || [ "${IDLE_MINUTES:-0}" != "0" ]; }; then
+  VLLM_PORT="$PORT" python3 /app/self_down.py >&2 &
+  echo "[max-warm] Layer-2 watchdog armed: idle ${IDLE_MINUTES:-30}m / max-warm ${MAX_WARM_HOURS:-0}h"
 fi
 
 echo "starting vLLM: model=$MODEL_ARG served=$SERVED_NAME maxlen=$MODEL_MAX_LEN quant=${MODEL_QUANT:-none} load_format=${LOAD_FORMAT:-default} parser=${TOOL_PARSER:-none} reasoning=${REASONING_PARSER:-none} kv=${KV_DTYPE:-auto} spec=${SPEC_CONFIG:+mtp} eager=${ENFORCE_EAGER:+yes}"

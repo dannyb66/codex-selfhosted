@@ -1,39 +1,20 @@
 {
   "name": "max-warm-watchdog",
-  "image": "235391889963.dkr.ecr.us-east-2.amazonaws.com/devci-llm-inference:gpu-devstral",
+  "_comment": "Layer-2 server-side self-down sidecar for entryPoint-OVERRIDE taskdefs (which bypass entrypoint-gpu.sh). Same watchdog as server/self_down.py: scales THIS service (+ASG) to 0 after IDLE_MINUTES of no vLLM activity OR MAX_WARM_HOURS, whichever first. This clean shape execs /app/self_down.py (requires the image to bake it, as server/Dockerfile.gpu does). The live devci taskdef runs the minimal gpu-stream image, which does NOT bake self_down.py, so its sidecar INLINES the identical logic from server/max-warm-sidecar-entrypoint.sh instead — keep the two in sync. Tune via IDLE_MINUTES / MAX_WARM_HOURS / IDLE_POLL_SEC env (0 disables that layer); needs the task role in server/self-down-iam.json.",
+  "image": "235391889963.dkr.ecr.us-east-2.amazonaws.com/devci-llm-inference:gpu",
   "essential": false,
-  "entryPoint": [
-    "/bin/bash",
-    "-lc",
-    "H=\"${MAX_WARM_HOURS:-0}\"\nif [ \"$H\" = \"0\" ]; then echo \"[max-warm] disabled (MAX_WARM_HOURS=0)\"; exec sleep infinity; fi\nSECS=$(python3 -c \"import sys;print(int(float(sys.argv[1])*3600))\" \"$H\")\necho \"[max-warm] armed: self-down in ${SECS}s\"\nsleep \"$SECS\"\necho \"[max-warm] firing self-down\"\npython3 - <<'PYEOF'\nimport os,boto3\nr=os.environ.get('AWS_REGION','us-east-2')\ndef t(f,w):\n    try: f(); print('[max-warm]',w,'ok',flush=True)\n    except Exception as e: print('[max-warm]',w,'ERR',e,flush=True)\nsc=os.environ.get('SELF_SCALABLE'); a=os.environ.get('SELF_ASG')\nif sc: t(lambda:boto3.client('application-autoscaling',region_name=r).register_scalable_target(ServiceNamespace='ecs',ResourceId=sc,ScalableDimension='ecs:service:DesiredCount',MinCapacity=0),'min=0')\nt(lambda:boto3.client('ecs',region_name=r).update_service(cluster=os.environ['SELF_CLUSTER'],service=os.environ['SELF_SERVICE'],desiredCount=0),'desired=0')\nif a: t(lambda:boto3.client('autoscaling',region_name=r).update_auto_scaling_group(AutoScalingGroupName=a,MinSize=0,DesiredCapacity=0),'asg=0')\nprint('[max-warm] self-down done',flush=True)\nPYEOF\necho \"[max-warm] sidecar exiting\"\nsleep 60"
-  ],
+  "entryPoint": ["/bin/bash", "-lc", "exec python3 /app/self_down.py"],
   "cpu": 32,
   "memoryReservation": 64,
   "environment": [
-    {
-      "name": "MAX_WARM_HOURS",
-      "value": "3"
-    },
-    {
-      "name": "SELF_CLUSTER",
-      "value": "dev-cluster-for-web"
-    },
-    {
-      "name": "SELF_SERVICE",
-      "value": "devci-llm-inference-gpu-service"
-    },
-    {
-      "name": "SELF_ASG",
-      "value": "devci-llm-gpu-asg"
-    },
-    {
-      "name": "SELF_SCALABLE",
-      "value": "service/dev-cluster-for-web/devci-llm-inference-gpu-service"
-    },
-    {
-      "name": "AWS_REGION",
-      "value": "us-east-2"
-    }
+    { "name": "IDLE_MINUTES", "value": "30" },
+    { "name": "MAX_WARM_HOURS", "value": "3" },
+    { "name": "IDLE_POLL_SEC", "value": "60" },
+    { "name": "SELF_CLUSTER", "value": "dev-cluster-for-web" },
+    { "name": "SELF_SERVICE", "value": "devci-llm-inference-gpu-service" },
+    { "name": "SELF_ASG", "value": "devci-llm-gpu-asg" },
+    { "name": "SELF_SCALABLE", "value": "service/dev-cluster-for-web/devci-llm-inference-gpu-service" },
+    { "name": "AWS_REGION", "value": "us-east-2" }
   ],
   "logConfiguration": {
     "logDriver": "awslogs",

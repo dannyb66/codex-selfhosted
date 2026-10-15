@@ -51,7 +51,8 @@ machine unless you override the ports per env file.
 | `CODEX_IDLE_REAPER` | `1` | Layer 1 — `0` disables the client-side idle reaper entirely (stay warm until manual `down`) |
 | `CODEX_IDLE_TTL_MIN` / `CODEX_IDLE_TTL_SEC` | 30 min | Layer 1 — idle window before auto-down; `_SEC` exists specifically to make this testable without a 30-minute wait |
 | `CODEX_REAP_POLL` | 60 s | Layer 1 — how often the reaper scrapes `/metrics` |
-| `MAX_WARM_HOURS` (taskdef env, not client config) | unset (disabled) | Layer 2 — absolute cap enforced from inside the GPU container, independent of the client |
+| `IDLE_MINUTES` (taskdef env, not client config) | 30 (when Layer 2 armed) | Layer 2 **idle** timeout — the GPU container watches vLLM `/metrics` itself and self-downs after this many minutes of no activity; `0` disables idle-down |
+| `MAX_WARM_HOURS` (taskdef env, not client config) | unset (disabled) | Layer 2 **hard ceiling** — self-down after this many warm hours regardless of activity, independent of the client; `0`/unset disables the cap. Arming either `IDLE_MINUTES` or `MAX_WARM_HOURS` (with `SELF_CLUSTER`) turns Layer 2 on |
 | `SELF_CLUSTER` / `SELF_SERVICE` / `SELF_ASG` / `SELF_SCALABLE` (taskdef env) | unset | Layer 2 — what the in-container watchdog is allowed to scale down (IAM-scoped to these exact resources, see `server/self-down-iam.json`) |
 
 For an entryPoint-override taskdef (one that bypasses `entrypoint-gpu.sh`), Layer 2 ships as a

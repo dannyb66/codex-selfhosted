@@ -56,9 +56,11 @@ as many terminals as you like; each session gets its own isolated `CODEX_HOME`.
 **Cost control is layered**, so a warm GPU can never be left billable by accident:
 1. **Idle auto-down (client).** `up` starts a reaper that polls vLLM `/metrics`; after
    `CODEX_IDLE_TTL_MIN` (default 30) minutes with no request activity it runs `down` for you.
-2. **Max-warm backstop (server).** If the taskdef sets `MAX_WARM_HOURS`, the GPU container
-   (`server/self_down.py`) scales the service to zero after that absolute cap — even if the client
-   that ran `up` vanished (closed laptop, killed terminal).
+2. **Server-side self-down (backstop).** If the taskdef sets `IDLE_MINUTES` and/or `MAX_WARM_HOURS`, the
+   GPU container (`server/self_down.py`) watches vLLM `/metrics` itself and scales the service to zero after
+   `IDLE_MINUTES` idle **or** the `MAX_WARM_HOURS` absolute cap, whichever comes first — even if the client
+   that ran `up` vanished (closed laptop, killed terminal). Client-independent, so it also catches boxes
+   brought up outside `up` (e.g. via the AWS CLI / a redeploy) that the client reaper never sees.
 
 ---
 
@@ -186,7 +188,7 @@ Client config lives at `~/.config/codex-selfhosted/${CODEX_ENV}.env` (created by
 | `devstral-small-2`* | Devstral Small 2 24B (Mistral3) AWQ ~15GiB | g5.2xlarge (A10G 24GB **+ 32GB RAM**; g5.xlarge's 16GB OOMs) | — | **no** — drive with OpenHands / mini-SWE-agent / Mistral `vibe` (see below) |
 
 \* no longer a row in `models.json` — it runs on awsdev via a taskdef entry-point override
-(image tag `gpu-devstral`, see `server/max-warm-sidecar.json`).
+(see `server/max-warm-sidecar.json` for the override-sidecar + self-down pattern).
 
 Per-model detail (VRAM math, quant, KV dtype, deploy notes) lives in the `_note` fields of
 [`server/models.json`](server/models.json).

@@ -42,7 +42,7 @@ vLLM fork — a narrow, replaceable layer rather than a patch to a vendored depe
 | Compat proxy | `bin/codex-role-proxy.py` | Codex↔vLLM request rewriting (developer→system etc.), streams responses through untouched |
 | MFA helper | `bin/aws-mfa.sh` | `sts get-session-token` with the user's virtual MFA → 12h `AWS_*` creds in `/tmp/mfa-env-<env>.sh` |
 | GPU image | `server/Dockerfile.gpu`, `server/entrypoint-gpu.sh`, `server/models.json` | vLLM-only image; `MODEL_KEY` registry resolves a model row to the full serve command (quantization, KV-cache dtype, tool/reasoning parsers, speculative-decoding config); in-container max-warm watchdog |
-| Self-down | `server/self_down.py`, `server/max-warm-sidecar.json` | Server-side (Layer-2) scale-to-zero after an absolute warm-time cap, independent of the client |
+| Self-down | `server/self_down.py`, `server/max-warm-sidecar.json` | Server-side (Layer-2) scale-to-zero on vLLM idle (`IDLE_MINUTES`) **or** an absolute warm-time cap (`MAX_WARM_HOURS`), whichever first — independent of the client |
 | Infra (IaC) | `infra/*.tf` | VPC/SGs (optional), ECR, GPU ASG + launch template, ECS capacity provider, cluster, service, 3 IAM roles, application-autoscaling target |
 | Config | `config.example.env`, `config.default.env`, `~/.config/codex-selfhosted/<env>.env` | Per-account settings; the client sources exactly one file per `CODEX_ENV` — no account name is hardcoded anywhere in `bin/` |
 | Tests | `tests/test_proxy.py` | Unit tests for every proxy rewrite rule |

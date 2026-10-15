@@ -35,24 +35,26 @@ the same `scale_to_zero` routine manual `down` uses. Polling the model's own req
 keystroke timer or a "has a terminal been closed" heuristic — means a long-running `exec` or an
 idle-but-still-open `chat` are told apart correctly.
 
-### Layer 2 — server-side max-warm backstop (absolute-time-based)
+### Layer 2 — server-side self-down (idle + max-warm, from inside the container)
 
-An in-container watchdog that does not depend on the client having ever existed. Two deploy shapes,
-same logic:
+An in-container watchdog that does not depend on the client having ever existed. It polls vLLM
+`/metrics` (the same activity signal Layer 1 uses) and scales to zero after `IDLE_MINUTES` of no request
+activity **or** a `MAX_WARM_HOURS` absolute ceiling — whichever comes first. The idle timeout is what
+makes it catch boxes brought up *outside* the client `up` (AWS CLI, a redeploy), which Layer 1 never
+sees; the hard cap is the last-resort guarantee. Two deploy shapes, same logic:
 
-- **Image-entrypoint taskdefs:** `entrypoint-gpu.sh` arms a background timer when `MAX_WARM_HOURS` is
-  set; at expiry it runs `server/self_down.py`, which scales the ECS service (and, if configured, the
-  application-autoscaling target and the ASG) to zero using the task role's own IAM permissions
-  (`server/self-down-iam.json`, scoped to exactly one service ARN plus the two autoscaling actions it
-  needs — not a wildcard).
+- **Image-entrypoint taskdefs:** `entrypoint-gpu.sh` runs `server/self_down.py` in the background; it
+  watches `/metrics` and scales the ECS service (and, if configured, the application-autoscaling target
+  and the ASG) to zero using the task role's own IAM permissions (`server/self-down-iam.json`, scoped to
+  exactly one service ARN plus the two autoscaling actions it needs — not a wildcard).
 - **entryPoint-override taskdefs** (which bypass `entrypoint-gpu.sh` entirely): the same logic ships as
-  a non-essential **sidecar container** (`server/max-warm-sidecar.json`) that inlines the identical
-  sleep-then-self-down behavior — this is the live-deployed shape for taskdefs that override the image
-  entrypoint directly.
+  a non-essential **sidecar container** (`server/max-warm-sidecar.json` + `max-warm-sidecar-entrypoint.sh`).
+  The minimal `gpu-stream` streaming image does not bake `self_down.py`, so the live-deployed sidecar
+  **inlines** the identical idle+max-warm watch-then-self-down logic rather than calling it.
 
 This is a true backstop: it requires nothing from the client, the developer's laptop, or the network
-path between them — only that the taskdef sets `MAX_WARM_HOURS` and `SELF_CLUSTER`/`SELF_SERVICE` (and
-is inert, by construction, on any taskdef that doesn't).
+path between them — only that the taskdef sets `IDLE_MINUTES` and/or `MAX_WARM_HOURS` plus
+`SELF_CLUSTER`/`SELF_SERVICE` (and is inert, by construction, on any taskdef that doesn't).
 
 ### Convergent teardown
 
@@ -77,10 +79,11 @@ pool) rather than leaving the operator to go spelunking in CloudWatch mid-incide
 - **Both layers are independently disableable** (`CODEX_IDLE_REAPER=0`; `MAX_WARM_HOURS=0` or unset)
   and **inert by default** where not configured — Layer 2 adds zero behavior to a taskdef that
   doesn't set its environment variables, so it's safe to leave the capability in the image unused.
-- **No cost surprise is more than one layer away.** Idle-but-forgotten is caught by Layer 1 in
-  `CODEX_IDLE_TTL_MIN`; client-gone-entirely is caught by Layer 2 within `MAX_WARM_HOURS`. The two
-  timers are intentionally on different triggers (activity vs. absolute wall-clock) rather than the
-  same mechanism duplicated, so a bug in one detection method doesn't also break the other.
+- **No cost surprise is more than one layer away.** Idle-but-forgotten is caught by Layer 1
+  (`CODEX_IDLE_TTL_MIN`) *and*, client-independently, by Layer 2's own idle timeout (`IDLE_MINUTES`) — so
+  a box upped outside the client (AWS CLI, a redeploy) that Layer 1 never sees still downs on idle, and
+  `MAX_WARM_HOURS` is the absolute last-resort cap behind both. Layer 1 runs on the client, Layer 2 inside
+  the task, so a failure of one (dead laptop, broken tunnel) doesn't disable the other.
 - **Observability is symmetric with control.** `status` reports reaper liveness alongside tunnel/proxy
   state and the served model, so "is this costing me money right now, and why" is always a single
   command away rather than something to reconstruct from CloudWatch after the fact.
